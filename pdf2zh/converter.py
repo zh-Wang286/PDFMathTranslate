@@ -22,6 +22,7 @@ from pdf2zh.translator import (
     AzureTranslator,
     BaseTranslator,
     BingTranslator,
+    DashScopeTranslator,
     DeepLTranslator,
     DeepLXTranslator,
     DeepseekTranslator,
@@ -159,7 +160,7 @@ class TranslateConverter(PDFConverterEx):
         if not envs:
             envs = {}
         for translator in [GoogleTranslator, BingTranslator, DeepLTranslator, DeepLXTranslator, OllamaTranslator, XinferenceTranslator, AzureOpenAITranslator,
-                           OpenAITranslator, ZhipuTranslator, ModelScopeTranslator, SiliconTranslator, GeminiTranslator, AzureTranslator, TencentTranslator, DifyTranslator, AnythingLLMTranslator, ArgosTranslator, GrokTranslator, GroqTranslator, DeepseekTranslator, OpenAIlikedTranslator, QwenMtTranslator,]:
+                           OpenAITranslator, ZhipuTranslator, ModelScopeTranslator, SiliconTranslator, GeminiTranslator, AzureTranslator, TencentTranslator, DifyTranslator, AnythingLLMTranslator, ArgosTranslator, GrokTranslator, GroqTranslator, DeepseekTranslator, OpenAIlikedTranslator, DashScopeTranslator, QwenMtTranslator,]:
             if service_name == translator.name:
                 self.translator = translator(lang_in, lang_out, service_model, envs=envs, prompt=prompt, ignore_cache=ignore_cache)
         if not self.translator:

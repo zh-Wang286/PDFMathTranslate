@@ -399,9 +399,9 @@ class OpenAITranslator(BaseTranslator):
     # https://github.com/openai/openai-python
     name = "openai"
     envs = {
-        "OPENAI_BASE_URL": "https://api.openai.com/v1",
+        "OPENAI_BASE_URL": "https://ark.cn-beijing.volces.com/api/v3",
         "OPENAI_API_KEY": None,
-        "OPENAI_MODEL": "gpt-4o-mini",
+        "OPENAI_MODEL": "deepseek-v3-250324",
     }
     CustomPrompt = True
 
@@ -971,6 +971,45 @@ class OpenAIlikedTranslator(OpenAITranslator):
         )
         self.prompttext = prompt
 
+
+class DashScopeTranslator(OpenAITranslator):
+    """DashScope API translator (compatible with OpenAI API format)"""
+    name = "dashscope"
+    envs = {
+        "DASHSCOPE_BASE_URL": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "DASHSCOPE_API_KEY": None,
+        "DASHSCOPE_MODEL": "deepseek-r1-distill-qwen-32b",
+    }
+    CustomPrompt = True
+
+    def __init__(
+        self, lang_in, lang_out, model, envs=None, prompt=None, ignore_cache=False
+    ):
+        self.set_envs(envs)
+        base_url = self.envs["DASHSCOPE_BASE_URL"]
+        api_key = self.envs["DASHSCOPE_API_KEY"]
+        if not model:
+            model = self.envs["DASHSCOPE_MODEL"]
+        
+        # 打印配置信息到控制台
+        print(f"=== DashScope翻译器配置信息 ===")
+        print(f"Base URL: {base_url}")
+        print(f"API Key: {api_key[:20]}...{api_key[-6:] if api_key and len(api_key) > 26 else api_key}")
+        print(f"模型名: {model}")
+        print(f"源语言: {lang_in}")
+        print(f"目标语言: {lang_out}")
+        print(f"==============================")
+        
+        super().__init__(
+            lang_in,
+            lang_out,
+            model,
+            base_url=base_url,
+            api_key=api_key,
+            ignore_cache=ignore_cache,
+        )
+        self.prompttext = prompt
+        self.add_cache_impact_parameters("prompt", self.prompt("", self.prompttext))
 
 class QwenMtTranslator(OpenAITranslator):
     """
