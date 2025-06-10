@@ -467,9 +467,9 @@ class OpenAITranslator(BaseTranslator):
 class AzureOpenAITranslator(BaseTranslator):
     name = "azure-openai"
     envs = {
-        "AZURE_OPENAI_BASE_URL": None,  # e.g. "https://xxx.openai.azure.com"
+        "AZURE_OPENAI_BASE_URL": "https://nnitasia-openai-01-ins.openai.azure.com/",  # e.g. "https://xxx.openai.azure.com"
         "AZURE_OPENAI_API_KEY": None,
-        "AZURE_OPENAI_MODEL": "gpt-4o-mini",
+        "AZURE_OPENAI_MODEL": "NNITAsia-GPT-4o",
         "AZURE_OPENAI_API_VERSION": "2024-06-01",  # default api version
     }
     CustomPrompt = True

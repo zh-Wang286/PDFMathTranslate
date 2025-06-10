@@ -127,6 +127,136 @@ class Paragraph:
         self.brk: bool = brk  # 换行标记
 
 
+class TableCell:
+    """表格单元格类"""
+    def __init__(self, x0: float, y0: float, x1: float, y1: float, text: str = "", font_size: float = 12.0):
+        self.x0: float = x0  # 左边界
+        self.y0: float = y0  # 上边界  
+        self.x1: float = x1  # 右边界
+        self.y1: float = y1  # 下边界
+        self.text: str = text  # 单元格文本内容
+        self.font_size: float = font_size  # 字体大小
+        self.chars: list = []  # 包含的字符对象
+        
+    def contains_point(self, x: float, y: float) -> bool:
+        """判断点是否在单元格内"""
+        return self.x0 <= x <= self.x1 and self.y0 <= y <= self.y1
+        
+    def add_char(self, char):
+        """添加字符到单元格"""
+        self.chars.append(char)
+        self.text += char.get_text()
+        if char.size > self.font_size:
+            self.font_size = char.size
+
+
+class TableRegion:
+    """表格区域类"""
+    def __init__(self, table_id: int, bbox: tuple):
+        self.table_id: int = table_id
+        self.x0, self.y0, self.x1, self.y1 = bbox
+        self.cells: list[TableCell] = []
+        self.lines: list = []  # 表格线条
+        
+    def extract_table_structure(self, chars: list, lines: list):
+        """
+        从字符和线条中提取表格结构
+        使用简单的坐标分析方法识别行列结构
+        """
+        # 收集表格区域内的字符
+        table_chars = []
+        for char in chars:
+            if (self.x0 <= char.x0 <= self.x1 and 
+                self.y0 <= char.y0 <= self.y1):
+                table_chars.append(char)
+        
+        log.info(f"[表格结构] 表格 {self.table_id} 区域内发现 {len(table_chars)} 个字符")
+        
+        if not table_chars:
+            log.warning(f"[表格结构] 表格 {self.table_id} 区域内未发现字符")
+            return []
+            
+        # 收集表格区域内的线条
+        table_lines = []
+        for line in lines:
+            line_x0, line_y0 = line.pts[0]
+            line_x1, line_y1 = line.pts[1]
+            if (self.x0 <= line_x0 <= self.x1 and self.y0 <= line_y0 <= self.y1 and
+                self.x0 <= line_x1 <= self.x1 and self.y0 <= line_y1 <= self.y1):
+                table_lines.append(line)
+        
+        log.info(f"[表格结构] 表格 {self.table_id} 区域内发现 {len(table_lines)} 条线条")
+        
+        # 按Y坐标对字符进行分组（识别行）
+        rows = {}
+        for char in table_chars:
+            y_key = round(char.y0, 1)  # 使用rounded y坐标作为行的key
+            if y_key not in rows:
+                rows[y_key] = []
+            rows[y_key].append(char)
+        
+        log.info(f"[表格结构] 表格 {self.table_id} 识别出 {len(rows)} 行")
+        
+        # 按行处理，进一步按X坐标分组（识别列）
+        cells = []
+        for row_idx, y_key in enumerate(sorted(rows.keys(), reverse=True)):  # 从上到下处理
+            row_chars = sorted(rows[y_key], key=lambda c: c.x0)  # 从左到右排序
+            
+            # 简单的列分组：基于字符间的间距
+            if not row_chars:
+                continue
+                
+            current_cell_chars = [row_chars[0]]
+            row_cells = []
+            
+            for i in range(1, len(row_chars)):
+                char = row_chars[i]
+                prev_char = current_cell_chars[-1]
+                
+                # 如果字符间距较大，则认为是新的单元格
+                if char.x0 - prev_char.x1 > 20:  # 20是经验阈值
+                    # 完成当前单元格
+                    cell_text = ''.join(c.get_text() for c in current_cell_chars)
+                    if cell_text.strip():  # 只处理非空单元格
+                        cell_x0 = min(c.x0 for c in current_cell_chars)
+                        cell_y0 = min(c.y0 for c in current_cell_chars) 
+                        cell_x1 = max(c.x1 for c in current_cell_chars)
+                        cell_y1 = max(c.y1 for c in current_cell_chars)
+                        cell_font_size = max(c.size for c in current_cell_chars)
+                        
+                        cell = TableCell(cell_x0, cell_y0, cell_x1, cell_y1, cell_text, cell_font_size)
+                        cell.chars = current_cell_chars.copy()
+                        cells.append(cell)
+                        row_cells.append(cell_text.strip())
+                    
+                    # 开始新单元格
+                    current_cell_chars = [char]
+                else:
+                    current_cell_chars.append(char)
+            
+            # 处理最后一个单元格
+            if current_cell_chars:
+                cell_text = ''.join(c.get_text() for c in current_cell_chars)
+                if cell_text.strip():
+                    cell_x0 = min(c.x0 for c in current_cell_chars)
+                    cell_y0 = min(c.y0 for c in current_cell_chars)
+                    cell_x1 = max(c.x1 for c in current_cell_chars)
+                    cell_y1 = max(c.y1 for c in current_cell_chars)
+                    cell_font_size = max(c.size for c in current_cell_chars)
+                    
+                    cell = TableCell(cell_x0, cell_y0, cell_x1, cell_y1, cell_text, cell_font_size)
+                    cell.chars = current_cell_chars.copy()
+                    cells.append(cell)
+                    row_cells.append(cell_text.strip())
+            
+            if row_cells:
+                log.info(f"[表格结构] 第 {row_idx+1} 行包含 {len(row_cells)} 个单元格: {row_cells}")
+        
+        log.info(f"[表格结构] 表格 {self.table_id} 提取完成，共 {len(cells)} 个单元格")
+        self.cells = cells
+        return cells
+
+
 # fmt: off
 class TranslateConverter(PDFConverterEx):
     def __init__(
@@ -186,6 +316,57 @@ class TranslateConverter(PDFConverterEx):
         xt_cls: int = -1                # 上一个字符所属段落，保证无论第一个字符属于哪个类别都可以触发新段落
         vmax: float = ltpage.width / 4  # 行内公式最大宽度
         ops: str = ""                   # 渲染结果
+        
+        # 表格处理
+        table_regions = {}              # 存储表格区域
+        table_cells = {}                # 存储表格单元格翻译结果
+        
+        # 获取表格区域信息
+        layout = self.layout[ltpage.pageid]
+        if 'table_regions' in self.layout and ltpage.pageid in self.layout['table_regions']:
+            table_info = self.layout['table_regions'][ltpage.pageid]
+            
+            # 收集所有字符和线条用于表格分析
+            all_chars = []
+            all_lines = []
+            for child in ltpage:
+                if isinstance(child, LTChar):
+                    all_chars.append(child)
+                elif isinstance(child, LTLine):
+                    all_lines.append(child)
+            
+            # 处理每个表格区域
+            for table_info_item in table_info:
+                table_id = table_info_item['id']
+                bbox = table_info_item['bbox']
+                
+                # 创建表格区域对象并提取结构
+                table_region = TableRegion(table_id, bbox)
+                cells = table_region.extract_table_structure(all_chars, all_lines)
+                
+                if cells:
+                    # 翻译表格单元格内容
+                    log.info(f"开始翻译表格 {table_id} 的 {len(cells)} 个单元格")
+                    for cell_idx, cell in enumerate(cells):
+                        if cell.text.strip() and not cell.text.strip().replace('.', '').replace(',', '').replace('-', '').isdigit():
+                            # 只翻译非空非纯数字的单元格
+                            try:
+                                original_text = cell.text.strip()
+                                log.info(f"[表格翻译] 单元格 {cell_idx+1}/{len(cells)} 输入: '{original_text}'")
+                                translated_text = self.translator.translate(original_text)
+                                cell.translated_text = translated_text
+                                log.info(f"[表格翻译] 单元格 {cell_idx+1}/{len(cells)} 输出: '{translated_text}'")
+                                log.debug(f"Table cell translation: '{original_text}' -> '{translated_text}'")
+                            except Exception as e:
+                                log.warning(f"Failed to translate table cell '{cell.text.strip()}': {e}")
+                                cell.translated_text = cell.text.strip()
+                        else:
+                            cell.translated_text = cell.text.strip()
+                            if cell.text.strip():
+                                log.info(f"[表格翻译] 单元格 {cell_idx+1}/{len(cells)} 跳过翻译(数字/空白): '{cell.text.strip()}'")
+                    
+                    table_regions[table_id] = table_region
+                    log.info(f"完成表格 {table_id} 的翻译，共处理 {len(cells)} 个单元格")
 
         def vflag(font: str, char: str):    # 匹配公式（和角标）字体
             if isinstance(font, bytes):     # 不一定能 decode，直接转 str
@@ -234,6 +415,11 @@ class TranslateConverter(PDFConverterEx):
                 # 读取当前字符在 layout 中的类别
                 cx, cy = np.clip(int(child.x0), 0, w - 1), np.clip(int(child.y0), 0, h - 1)
                 cls = layout[cy, cx]
+                
+                # 跳过表格区域的字符，它们会在表格处理中单独处理
+                if cls < 0:  # 表格区域使用负数ID标识
+                    continue
+                    
                 # 锚定文档中 bullet 的位置
                 if child.get_text() == "•":
                     cls = 0
@@ -349,7 +535,9 @@ class TranslateConverter(PDFConverterEx):
             if not s.strip() or re.match(r"^\{v\d+\}$", s):  # 空白和公式不翻译
                 return s
             try:
+                log.info(f"[段落翻译] 输入: '{s.strip()}'")
                 new = self.translator.translate(s)
+                log.info(f"[段落翻译] 输出: '{new.strip()}'")
                 return new
             except BaseException as e:
                 if log.isEnabledFor(logging.DEBUG):
@@ -357,10 +545,13 @@ class TranslateConverter(PDFConverterEx):
                 else:
                     log.exception(e, exc_info=False)
                 raise e
+        
+        log.info(f"开始翻译 {len(sstk)} 个段落")
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=self.thread
         ) as executor:
             news = list(executor.map(worker, sstk))
+        log.info(f"完成段落翻译")
 
         ############################################################
         # C. 新文档排版
@@ -523,6 +714,44 @@ class TranslateConverter(PDFConverterEx):
         for l in lstk:  # 排版全局线条
             if l.linewidth < 5:  # hack 有的文档会用粗线条当图片背景
                 ops_list.append(gen_op_line(l.pts[0][0], l.pts[0][1], l.pts[1][0] - l.pts[0][0], l.pts[1][1] - l.pts[0][1], l.linewidth))
+
+        ############################################################
+        # D. 表格排版
+        log.info(f"开始排版 {len(table_regions)} 个表格区域")
+        for table_id, table_region in table_regions.items():
+            log.info(f"排版表格 {table_id}，包含 {len(table_region.cells)} 个单元格")
+            for cell_idx, cell in enumerate(table_region.cells):
+                if hasattr(cell, 'translated_text') and cell.translated_text:
+                    # 对每个单元格进行排版
+                    cell_x = cell.x0
+                    cell_y = cell.y0
+                    cell_size = cell.font_size
+                    
+                    # 选择合适的字体
+                    fcur = None
+                    text = cell.translated_text
+                    
+                    # 尝试使用原始字符的字体，如果没有则使用默认字体
+                    if cell.chars:
+                        original_char = cell.chars[0]
+                        try:
+                            if self.fontmap["tiro"].to_unichr(ord(text[0])) == text[0]:
+                                fcur = "tiro"
+                        except Exception:
+                            pass
+                    
+                    if fcur is None:
+                        fcur = self.noto_name
+                    
+                    # 生成文本操作指令
+                    rtxt = raw_string(fcur, text)
+                    ops_list.append(gen_op_txt(fcur, cell_size, cell_x, cell_y, rtxt))
+                    
+                    log.info(f"[表格排版] 单元格 {cell_idx+1}: '{text}' 位置({cell_x:.1f}, {cell_y:.1f}) 字体:{fcur} 大小:{cell_size:.1f}")
+                    log.debug(f"Table cell rendered: '{text}' at ({cell_x:.1f}, {cell_y:.1f}) size {cell_size:.1f}")
+        
+        if len(table_regions) > 0:
+            log.info(f"完成 {len(table_regions)} 个表格的排版")
 
         ops = f"BT {''.join(ops_list)}ET "
         return ops

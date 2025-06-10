@@ -133,9 +133,11 @@ def translate_patch(
             # kdtree 是不可能 kdtree 的，不如直接渲染成图片，用空间换时间
             box = np.ones((pix.height, pix.width))
             h, w = box.shape
-            vcls = ["abandon", "figure", "table", "isolate_formula", "formula_caption"]
+            vcls = ["abandon", "figure", "isolate_formula", "formula_caption"]
+            table_regions = []  # 存储表格区域信息
+            table_count = 0  # 表格计数
             for i, d in enumerate(page_layout.boxes):
-                if page_layout.names[int(d.cls)] not in vcls:
+                if page_layout.names[int(d.cls)] not in vcls and page_layout.names[int(d.cls)] != "table":
                     x0, y0, x1, y1 = d.xyxy.squeeze()
                     x0, y0, x1, y1 = (
                         np.clip(int(x0 - 1), 0, w - 1),
@@ -144,6 +146,35 @@ def translate_patch(
                         np.clip(int(h - y0 + 1), 0, h - 1),
                     )
                     box[y0:y1, x0:x1] = i + 2
+                elif page_layout.names[int(d.cls)] == "table":
+                    # 表格区域使用负数ID标识，便于后续特殊处理
+                    table_count += 1
+                    x0, y0, x1, y1 = d.xyxy.squeeze()
+                    logger.info(f"[版面分析] 第 {page.pageno+1} 页发现表格 {table_count}: 位置({x0:.1f}, {y0:.1f}, {x1:.1f}, {y1:.1f})")
+                    x0, y0, x1, y1 = (
+                        np.clip(int(x0 - 1), 0, w - 1),
+                        np.clip(int(h - y1 - 1), 0, h - 1),
+                        np.clip(int(x1 + 1), 0, w - 1),
+                        np.clip(int(h - y0 + 1), 0, h - 1),
+                    )
+                    table_id = -(i + 100)  # 使用负数ID标识表格区域
+                    box[y0:y1, x0:x1] = table_id
+                    # 保存表格区域信息供后续处理使用
+                    table_regions.append({
+                        'id': table_id,
+                        'bbox': (x0, y0, x1, y1),
+                        'original_bbox': d.xyxy.squeeze()
+                    })
+                    logger.info(f"[版面分析] 表格 {table_count} 标记为ID: {table_id}")
+            
+            # 存储表格区域信息到layout中
+            if 'table_regions' not in layout:
+                layout['table_regions'] = {}
+            layout['table_regions'][page.pageno] = table_regions
+            
+            if table_count > 0:
+                logger.info(f"[版面分析] 第 {page.pageno+1} 页共发现 {table_count} 个表格区域")
+            
             for i, d in enumerate(page_layout.boxes):
                 if page_layout.names[int(d.cls)] in vcls:
                     x0, y0, x1, y1 = d.xyxy.squeeze()
