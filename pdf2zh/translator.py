@@ -349,7 +349,7 @@ class XinferenceTranslator(BaseTranslator):
     name = "xinference"
     envs = {
         "XINFERENCE_HOST": "http://127.0.0.1:9997",
-        "XINFERENCE_MODEL": "gemma-2-it",
+        "XINFERENCE_MODEL": "DeepSeek-R1-Distill-Qwen-32B-W4A16",
     }
     CustomPrompt = True
 
@@ -365,20 +365,35 @@ class XinferenceTranslator(BaseTranslator):
         self.prompttext = prompt
         self.add_cache_impact_parameters("temperature", self.options["temperature"])
 
+        logger.info(f"XINFERENCE_HOST: {self.envs['XINFERENCE_HOST']}, XINFERENCE_MODEL: {self.envs['XINFERENCE_MODEL']}")
+
+    @staticmethod
+    def _remove_cot_content(content: str) -> str:
+        """Remove text content with the thought chain from the chat response
+
+        :param content: Non-streaming text content
+        :return: Text without a thought chain
+        """
+        return re.sub(r"^<think>.+?</think>", "", content, count=1, flags=re.DOTALL)
+
     def do_translate(self, text):
         maxlen = max(2000, len(text) * 5)
         for model in self.model.split(";"):
             try:
                 xf_model = self.client.get_model(model)
+                # logger.info(f"xf_model: {xf_model}")
                 xf_prompt = self.prompt(text, self.prompttext)
+                logger.info(f"pre xf_prompt: {xf_prompt}")
                 xf_prompt = [
                     {
                         "role": "user",
                         "content": xf_prompt[0]["content"]
-                        + "\n"
-                        + xf_prompt[1]["content"],
+                        # + "\n"
+                        # + xf_prompt[1]["content"],
                     }
                 ]
+                logger.info(f"post xf_prompt: {xf_prompt}")
+
                 response = xf_model.chat(
                     generate_config=self.options,
                     messages=xf_prompt,
@@ -387,9 +402,10 @@ class XinferenceTranslator(BaseTranslator):
                 response = response["choices"][0]["message"]["content"].replace(
                     "<end_of_turn>", ""
                 )
-                if len(response) > maxlen:
+                content = self._remove_cot_content(response)
+                if len(content) > maxlen:
                     raise Exception("Response too long")
-                return response.strip()
+                return content.strip()
             except Exception as e:
                 print(e)
         raise Exception("All models failed")
