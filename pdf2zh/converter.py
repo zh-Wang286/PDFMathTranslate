@@ -348,7 +348,7 @@ class TranslateConverter(PDFConverterEx):
                     # 翻译表格单元格内容
                     log.info(f"开始翻译表格 {table_id} 的 {len(cells)} 个单元格")
                     for cell_idx, cell in enumerate(cells):
-                        if cell.text.strip() and not cell.text.strip().replace('.', '').replace(',', '').replace('-', '').isdigit():
+                        if cell.text.strip() and not cell.text.strip().replace('.', '').replace(',', '').replace('-', '').replace('–', '').isdigit():
                             # 只翻译非空非纯数字的单元格
                             try:
                                 original_text = cell.text.strip()
