@@ -374,10 +374,15 @@ class XinferenceTranslator(BaseTranslator):
         :param content: Non-streaming text content
         :return: Text without a thought chain
         """
-        return re.sub(r"^<think>.+?</think>", "", content, count=1, flags=re.DOTALL)
+        end_think_tag = "</think>"
+        end_pos = content.find(end_think_tag)
+        if end_pos == -1:
+            return content.strip()  
+        # TODO: 对于R1-Distill 模型，Xinference/vllm 启动缺少<think>标签，需要手动提取 </think> 后的内容
+        return content[end_pos + len(end_think_tag):].strip()
 
     def do_translate(self, text):
-        maxlen = max(2000, len(text) * 5)
+        maxlen = max(8000, len(text) * 5) # 避免过长的翻译结果被截断
         for model in self.model.split(";"):
             try:
                 xf_model = self.client.get_model(model)
