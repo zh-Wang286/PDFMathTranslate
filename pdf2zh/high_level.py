@@ -29,6 +29,8 @@ from pdf2zh.pdfinterp import PDFPageInterpreterEx
 from pdf2zh.config import ConfigManager
 from babeldoc.assets.assets import get_font_and_metadata
 
+from pdf2zh.converter import AnalysisConverter
+
 NOTO_NAME = "noto"
 
 logger = logging.getLogger(__name__)
@@ -54,6 +56,106 @@ noto_list = [
     "ur",  # Urdu
     "uk",  # Ukrainian
 ]
+
+
+def analyze_pdf(
+    pdf_bytes: bytes,
+    model: OnnxModel,
+    pages: Optional[list[int]] = None,
+    cancellation_event: asyncio.Event = None,
+) -> dict:
+    """
+    Analyzes a PDF file to gather statistics about its content.
+
+    Args:
+        pdf_bytes: The PDF content as bytes.
+        model: The ONNX layout analysis model.
+        pages: A list of page numbers to analyze. If None, all pages are analyzed.
+        cancellation_event: An event to signal cancellation.
+
+    Returns:
+        A dictionary containing the analysis results.
+    """
+    # Create two independent streams from the same bytes to avoid conflicts
+    inf_for_pdfminer = io.BytesIO(pdf_bytes)
+    inf_for_pymupdf = io.BytesIO(pdf_bytes)
+
+    rsrcmgr = PDFResourceManager()
+    layout = {}
+    device = AnalysisConverter(rsrcmgr, layout)
+    interpreter = PDFPageInterpreterEx(rsrcmgr, device, {})
+
+    parser = PDFParser(inf_for_pdfminer)
+    doc = PDFDocument(parser)
+    doc_for_render = Document(stream=inf_for_pymupdf)
+
+    pages_to_process = pages
+    if pages_to_process is None:
+        pages_to_process = list(range(doc_for_render.page_count))
+
+    with tqdm.tqdm(total=len(pages_to_process), desc="Analyzing PDF") as progress:
+        for pageno, page in enumerate(PDFPage.create_pages(doc)):
+            page.pageno = pageno
+
+            if pageno not in pages_to_process:
+                continue
+
+            if cancellation_event and cancellation_event.is_set():
+                raise CancelledError("Analysis task cancelled")
+            
+            # Following the robust pattern from translate_patch:
+            # The 'page_xref' attribute is also required by the interpreter.
+            page.page_xref = doc_for_render.get_new_xref()
+            
+            # --- Layout analysis (from translate_patch) ---
+            pix = doc_for_render[pageno].get_pixmap()
+            image = np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.width, 3)[:, :, ::-1]
+            page_layout = model.predict(image, imgsz=int(pix.height / 32) * 32)[0]
+            box = np.ones((pix.height, pix.width))
+            h, w = box.shape
+            vcls = ["abandon", "figure", "isolate_formula", "formula_caption"]
+            table_regions = []
+            
+            for i, d in enumerate(page_layout.boxes):
+                box_class = page_layout.names[int(d.cls)]
+                x0, y0, x1, y1 = d.xyxy.squeeze()
+                b_x0, b_y0, b_x1, b_y1 = (
+                    np.clip(int(x0 - 1), 0, w - 1),
+                    np.clip(int(h - y1 - 1), 0, h - 1),
+                    np.clip(int(x1 + 1), 0, w - 1),
+                    np.clip(int(h - y0 + 1), 0, h - 1),
+                )
+                
+                if box_class == "table":
+                    table_id = -(i + 100)
+                    box[b_y0:b_y1, b_x0:b_x1] = table_id
+                    table_regions.append({'id': table_id, 'bbox': (b_x0, b_y0, b_x1, b_y1)})
+                elif box_class not in vcls:
+                    box[b_y0:b_y1, b_x0:b_x1] = i + 2
+
+            if 'table_regions' not in layout:
+                layout['table_regions'] = {}
+            layout['table_regions'][pageno] = table_regions
+            
+            for i, d in enumerate(page_layout.boxes):
+                if page_layout.names[int(d.cls)] in vcls:
+                    x0, y0, x1, y1 = d.xyxy.squeeze()
+                    x0, y0, x1, y1 = (
+                        np.clip(int(x0 - 1), 0, w - 1),
+                        np.clip(int(h - y1 - 1), 0, h - 1),
+                        np.clip(int(x1 + 1), 0, w - 1),
+                        np.clip(int(h - y0 + 1), 0, h - 1),
+                    )
+                    box[y0:y1, x0:x1] = 0
+            
+            layout[pageno] = box
+            # --- End Layout analysis ---
+
+            interpreter.process_page(page)
+            progress.update()
+
+    device.close()
+    return device.stats
 
 
 def check_files(files: List[str]) -> List[str]:

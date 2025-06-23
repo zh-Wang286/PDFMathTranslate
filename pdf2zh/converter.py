@@ -42,6 +42,8 @@ from pdf2zh.translator import (
     ZhipuTranslator,
 )
 
+from pdf2zh.utils import count_tokens
+
 log = logging.getLogger(__name__)
 
 
@@ -255,6 +257,133 @@ class TableRegion:
         log.info(f"[表格结构] 表格 {self.table_id} 提取完成，共 {len(cells)} 个单元格")
         self.cells = cells
         return cells
+
+
+class AnalysisConverter(PDFConverterEx):
+    """
+    A converter for analyzing PDF layout and content without translation.
+    It counts pages, paragraphs, tables, cells, and tokens for both.
+    """
+    def __init__(self, rsrcmgr, layout={}) -> None:
+        super().__init__(rsrcmgr)
+        self.layout = layout
+        self.stats = {
+            "page_count": 0,
+            "pages": {},
+            "total_paragraph_tokens": 0,
+            "total_table_tokens": 0,
+        }
+
+    def receive_layout(self, ltpage: LTPage):
+        page_items = list(ltpage)
+        all_chars = [item for item in page_items if isinstance(item, LTChar)]
+        all_lines = [item for item in page_items if isinstance(item, LTLine)]
+
+        # 1. Analyze Tables first
+        table_regions = []
+        table_cells = []
+        table_token_count = 0
+        if 'table_regions' in self.layout and ltpage.pageid in self.layout['table_regions']:
+            table_layout_info = self.layout['table_regions'][ltpage.pageid]
+            for table_info_item in table_layout_info:
+                table_id = table_info_item['id']
+                bbox = table_info_item['bbox']
+                table_region = TableRegion(table_id, bbox)
+                # Use a copy of all_chars and all_lines for each table if needed,
+                # but here they are just read, so it's fine.
+                cells = table_region.extract_table_structure(all_chars, all_lines)
+                if cells:
+                    table_cells.extend(cells)
+                    table_regions.append(table_region)
+
+        for cell in table_cells:
+            table_token_count += count_tokens(cell.text.strip())
+
+        # 2. Analyze Paragraphs
+        sstk: list[str] = []
+        pstk: list[Paragraph] = []
+        vstk: list[LTChar] = []
+        xt: LTChar = None
+        xt_cls: int = -1
+        vmax: float = ltpage.width / 4
+
+        def vflag(font: str, char: str):
+            if isinstance(font, bytes):
+                try: font = font.decode('utf-8')
+                except UnicodeDecodeError: font = ""
+            font = font.split("+")[-1]
+            if re.match(r"\(cid:", char): return True
+            if re.match(r"(CM[^R]|MS.M|XY|MT|BL|RM|EU|LA|RS|LINE|LCIRCLE|TeX-|rsfs|txsy|wasy|stmary|.*Mono|.*Code|.*Ital|.*Sym|.*Math)", font): return True
+            if (char and char != " " and (unicodedata.category(char[0]) in ["Lm", "Mn", "Sk", "Sm", "Zl", "Zp", "Zs"] or ord(char[0]) in range(0x370, 0x400))): return True
+            return False
+
+        for child in page_items:
+            if not isinstance(child, LTChar): continue
+            
+            cur_v = False
+            layout_map = self.layout[ltpage.pageid]
+            h, w = layout_map.shape
+            cx, cy = np.clip(int(child.x0), 0, w - 1), np.clip(int(child.y0), 0, h - 1)
+            cls = layout_map[cy, cx]
+            if cls < 0: continue # Skip chars in table regions
+
+            if child.get_text() == "•": cls = 0
+            if (cls == 0 or (sstk and cls == xt_cls and len(sstk[-1].strip()) > 1 and child.size < pstk[-1].size * 0.79) or vflag(child.fontname, child.get_text()) or (child.matrix[0] == 0 and child.matrix[3] == 0)):
+                cur_v = True
+            
+            if not cur_v:
+                if vstk and child.get_text() in "()": cur_v = True
+            
+            if (not cur_v or cls != xt_cls or (sstk and sstk[-1] != "" and abs(child.x0 - xt.x0) > vmax)):
+                if vstk:
+                    if sstk and sstk[-1] == "": xt_cls = -1
+                    if sstk: sstk[-1] += "{v}"
+                    vstk = []
+
+            if not vstk:
+                if cls == xt_cls:
+                    if child.x0 > xt.x1 + 1: sstk[-1] += " "
+                    elif child.x1 < xt.x0: sstk[-1] += " "; pstk[-1].brk = True
+                else:
+                    sstk.append("")
+                    pstk.append(Paragraph(child.y0, child.x0, child.x0, child.x0, child.y0, child.y1, child.size, False))
+            
+            if not cur_v:
+                if (child.size > pstk[-1].size or len(sstk[-1].strip()) == 1) and child.get_text() != " ":
+                    pstk[-1].y -= child.size - pstk[-1].size
+                    pstk[-1].size = child.size
+                sstk[-1] += child.get_text()
+            else:
+                vstk.append(child)
+            
+            pstk[-1].x0 = min(pstk[-1].x0, child.x0); pstk[-1].x1 = max(pstk[-1].x1, child.x1)
+            pstk[-1].y0 = min(pstk[-1].y0, child.y0); pstk[-1].y1 = max(pstk[-1].y1, child.y1)
+            xt = child
+            xt_cls = cls
+
+        if vstk:
+            if sstk: sstk[-1] += "{v}"
+
+        # 3. Calculate and store stats
+        paragraph_token_count = 0
+        paragraph_count = 0
+        for para_text in sstk:
+            clean_text = para_text.strip()
+            if clean_text and not re.fullmatch(r"\{v\d*\}", clean_text):
+                paragraph_count += 1
+                paragraph_token_count += count_tokens(clean_text)
+
+        self.stats['pages'][ltpage.pageid] = {
+            'paragraph_count': paragraph_count,
+            'table_count': len(table_regions),
+            'table_cell_count': len(table_cells),
+            'paragraph_token_count': paragraph_token_count,
+            'table_token_count': table_token_count
+        }
+        self.stats['total_paragraph_tokens'] += paragraph_token_count
+        self.stats['total_table_tokens'] += table_token_count
+        self.stats['page_count'] += 1
+        return None
 
 
 # fmt: off

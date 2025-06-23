@@ -22,6 +22,9 @@ from babeldoc.high_level import async_translate as yadt_translate
 from babeldoc.high_level import init as yadt_init
 from babeldoc.main import create_progress_handler
 
+from pdf2zh.high_level import analyze_pdf
+import io
+
 logger = logging.getLogger(__name__)
 
 
@@ -317,6 +320,37 @@ def main(args: Optional[List[str]] = None) -> int:
         return 0
 
     print(parsed_args)
+
+    # Perform analysis before translation
+    if not parsed_args.babeldoc and parsed_args.files:
+        logger.info("="*20 + " PDF Analysis Report " + "="*20)
+        try:
+            with open(parsed_args.files[0], "rb") as f:
+                pdf_bytes = f.read()
+
+            stats = analyze_pdf(
+                pdf_bytes=pdf_bytes,
+                model=ModelInstance.value,
+                pages=parsed_args.pages,
+            )
+            total_paragraph_tokens = stats.get('total_paragraph_tokens', 0)
+            total_table_tokens = stats.get('total_table_tokens', 0)
+            logger.info(f"Total Pages: {stats.get('page_count', 0)}")
+            logger.info(f"Total Paragraph Tokens: {total_paragraph_tokens}")
+            logger.info(f"Total Table Tokens: {total_table_tokens}")
+            logger.info(f"Total Estimated Tokens: {total_paragraph_tokens + total_table_tokens}")
+            logger.info("-" * 59)
+            for page_num, page_data in stats.get('pages', {}).items():
+                logger.info(
+                    f"  - Page {page_num + 1}: "
+                    f"{page_data.get('paragraph_count', 0)} paragraphs ({page_data.get('paragraph_token_count', 0)} tokens) | "
+                    f"{page_data.get('table_count', 0)} tables "
+                    f"({page_data.get('table_cell_count', 0)} cells, {page_data.get('table_token_count', 0)} tokens)"
+                )
+        except Exception as e:
+            logger.error(f"An error occurred during PDF analysis: {e}", exc_info=True)
+        logger.info("="*59)
+
     if parsed_args.babeldoc:
         return yadt_main(parsed_args)
     if parsed_args.dir:
