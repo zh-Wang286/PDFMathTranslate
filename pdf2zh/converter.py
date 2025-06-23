@@ -348,22 +348,22 @@ class TranslateConverter(PDFConverterEx):
                     # 翻译表格单元格内容
                     log.info(f"开始翻译表格 {table_id} 的 {len(cells)} 个单元格")
                     for cell_idx, cell in enumerate(cells):
-                        if cell.text.strip() and not cell.text.strip().replace('.', '').replace(',', '').replace('-', '').replace('–', '').isdigit():
-                            # 只翻译非空非纯数字的单元格
+                        cell_text = cell.text.strip()
+                        if cell_text and re.search(r'[\u4e00-\u9fff]|[a-zA-Z]', cell_text):
+                            # 只翻译包含中文或英文字母的单元格
                             try:
-                                original_text = cell.text.strip()
-                                log.info(f"[表格翻译] 单元格 {cell_idx+1}/{len(cells)} 输入: '{original_text}'")
-                                translated_text = self.translator.translate(original_text)
+                                log.info(f"[表格翻译] 单元格 {cell_idx+1}/{len(cells)} 输入: '{cell_text}'")
+                                translated_text = self.translator.translate(cell_text)
                                 cell.translated_text = translated_text
                                 log.info(f"[表格翻译] 单元格 {cell_idx+1}/{len(cells)} 输出: '{translated_text}'")
-                                log.debug(f"Table cell translation: '{original_text}' -> '{translated_text}'")
+                                log.debug(f"Table cell translation: '{cell_text}' -> '{translated_text}'")
                             except Exception as e:
-                                log.warning(f"Failed to translate table cell '{cell.text.strip()}': {e}")
-                                cell.translated_text = cell.text.strip()
+                                log.warning(f"Failed to translate table cell '{cell_text}': {e}")
+                                cell.translated_text = cell_text
                         else:
-                            cell.translated_text = cell.text.strip()
-                            if cell.text.strip():
-                                log.info(f"[表格翻译] 单元格 {cell_idx+1}/{len(cells)} 跳过翻译(数字/空白): '{cell.text.strip()}'")
+                            cell.translated_text = cell_text
+                            if cell_text:
+                                log.info(f"[表格翻译] 单元格 {cell_idx+1}/{len(cells)} 跳过翻译(无中英文): '{cell_text}'")
                     
                     table_regions[table_id] = table_region
                     log.info(f"完成表格 {table_id} 的翻译，共处理 {len(cells)} 个单元格")

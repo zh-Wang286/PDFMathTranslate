@@ -134,18 +134,36 @@ class BaseTranslator:
         return [
             {
                 "role": "user",
-                "content": (
-                    "You are a professional, authentic machine translation engine. "
-                    "Only Output the translated text, do not include any other text."
-                    "\n\n"
-                    f"Translate the following markdown source text to {self.lang_out}. "
-                    "Keep the formula notation {v*} unchanged. "
-                    "Output translation directly without any additional text."
-                    "\n\n"
-                    f"Source Text: {text}"
-                    "\n\n"
-                    "Translated Text:"
-                ),
+                "content": f"""
+                You are a professional medical translation expert with certification from the World Health Organization (WHO) 
+                and the International Committee of Medical Journal Editors (ICMJ). 
+                Your knowledge base is continuously updated with the following authoritative resources: 
+
+                - Dorland's Illustrated Medical Dictionary (33rd Edition)
+                - Stedman's Medical Dictionary (Latest Edition)
+                - NIH MedlinePlus Medical Terminology Tree
+                - PubMed MeSH Subject Headings 
+                
+                Chinese Terminology Library:
+                - National Committee for Terms in Sciences and Technologies - Medical Terms Series (2020 Edition)
+                - People's Medical Publishing House - English-Chinese Medical Dictionary (3rd Edition)
+                - NMPA (National Medical Products Administration) - Drug Naming Guidelines
+                - U.S. FDA Orange Book
+                - China NMPA Drug Review Center Database
+                - ClinicalTrials.gov Latest Trial Naming
+
+                Translation Guidelines:
+                1. Terminology Handling:
+                    - Prioritize WHO International Classification Standards (ICD-11/INN)
+                    - Chinese Herbal Names follow the Latin Nomenclature of the Chinese Pharmacopoeia
+                    - Molecular Targets follow HUGO Gene Nomenclature
+                2. Specialized Optimization: Cardiovascular Disease, Hematology
+
+                Translate the following markdown source text to {self.lang_out}. Keep the formula notation {{v*}} unchanged. Output translation directly without any additional text.
+
+                Source Text: {text}
+
+                Translated Text:""",
             },
         ]
 
@@ -349,7 +367,7 @@ class XinferenceTranslator(BaseTranslator):
     name = "xinference"
     envs = {
         "XINFERENCE_HOST": "http://127.0.0.1:9997",
-        "XINFERENCE_MODEL": "DeepSeek-R1-Distill-Qwen-32B-W4A16",
+        "XINFERENCE_MODEL": "deepseek-r1-distill-qwen",
     }
     CustomPrompt = True
 
@@ -374,19 +392,14 @@ class XinferenceTranslator(BaseTranslator):
         :param content: Non-streaming text content
         :return: Text without a thought chain
         """
-        end_think_tag = "</think>"
-        end_pos = content.find(end_think_tag)
-        if end_pos == -1:
-            return content.strip()  
-        # TODO: 对于R1-Distill 模型，Xinference/vllm 启动缺少<think>标签，需要手动提取 </think> 后的内容
-        return content[end_pos + len(end_think_tag):].strip()
+        return re.sub(r"^<think>.+?</think>", "", content, count=1, flags=re.DOTALL)
 
     def do_translate(self, text):
-        maxlen = max(8000, len(text) * 5) # 避免过长的翻译结果被截断
+        maxlen = max(2000, len(text) * 5)
         for model in self.model.split(";"):
             try:
                 xf_model = self.client.get_model(model)
-                # logger.info(f"xf_model: {xf_model}")
+                logger.info(f"xf_model: {xf_model}")
                 xf_prompt = self.prompt(text, self.prompttext)
                 logger.info(f"pre xf_prompt: {xf_prompt}")
                 xf_prompt = [
@@ -420,9 +433,9 @@ class OpenAITranslator(BaseTranslator):
     # https://github.com/openai/openai-python
     name = "openai"
     envs = {
-        "OPENAI_BASE_URL": "https://ark.cn-beijing.volces.com/api/v3",
+        "OPENAI_BASE_URL": "http://chatgpt.nnit.cn:8695/v1",
         "OPENAI_API_KEY": None,
-        "OPENAI_MODEL": "deepseek-v3-250324",
+        "OPENAI_MODEL": "NNITAsia-GPT-4o",
     }
     CustomPrompt = True
 
