@@ -267,7 +267,7 @@ def translate_patch(
                         'bbox': (x0, y0, x1, y1),
                         'original_bbox': d.xyxy.squeeze()
                     })
-                    logger.info(f"[版面分析] 表格 {table_count} 标记为ID: {table_id}")
+                    logger.debug(f"[版面分析] 表格 {table_count} 标记为ID: {table_id}")
             
             # 存储表格区域信息到layout中
             if 'table_regions' not in layout:
