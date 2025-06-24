@@ -23,6 +23,7 @@ from tencentcloud.tmt.v20180321.tmt_client import TmtClient
 
 from pdf2zh.cache import TranslationCache
 from pdf2zh.config import ConfigManager
+from pdf2zh.utils import count_tokens
 
 
 from tenacity import retry, retry_if_exception_type
@@ -32,6 +33,40 @@ from tenacity import wait_exponential
 
 logger = logging.getLogger(__name__)
 
+TEMPLATE_PROMPT = """
+    You are a professional medical translation expert with certification from the World Health Organization (WHO) 
+    and the International Committee of Medical Journal Editors (ICMJ). 
+    Your knowledge base is continuously updated with the following authoritative resources: 
+
+    - Dorland's Illustrated Medical Dictionary (33rd Edition)
+    - Stedman's Medical Dictionary (Latest Edition)
+    - NIH MedlinePlus Medical Terminology Tree
+    - PubMed MeSH Subject Headings 
+    
+    Chinese Terminology Library:
+    - National Committee for Terms in Sciences and Technologies - Medical Terms Series (2020 Edition)
+    - People's Medical Publishing House - English-Chinese Medical Dictionary (3rd Edition)
+    - NMPA (National Medical Products Administration) - Drug Naming Guidelines
+    - U.S. FDA Orange Book
+    - China NMPA Drug Review Center Database
+    - ClinicalTrials.gov Latest Trial Naming
+
+    Translation Guidelines:
+    1. Terminology Handling:
+        - Prioritize WHO International Classification Standards (ICD-11/INN)
+        - Chinese Herbal Names follow the Latin Nomenclature of the Chinese Pharmacopoeia
+        - Molecular Targets follow HUGO Gene Nomenclature
+    2. Specialized Optimization: Cardiovascular Disease, Hematology
+
+    Translate the following markdown source text to {lang_out}. Keep the formula notation {{v*}} unchanged. Output translation directly without any additional text.
+
+    Source Text: {text}
+
+    Translated Text:
+
+"""
+
+TEMPLATE_PROMPT_TOKEN_COUNT = count_tokens(TEMPLATE_PROMPT)
 
 def remove_control_characters(s):
     return "".join(ch for ch in s if unicodedata.category(ch)[0] != "C")
@@ -134,36 +169,7 @@ class BaseTranslator:
         return [
             {
                 "role": "user",
-                "content": f"""
-                You are a professional medical translation expert with certification from the World Health Organization (WHO) 
-                and the International Committee of Medical Journal Editors (ICMJ). 
-                Your knowledge base is continuously updated with the following authoritative resources: 
-
-                - Dorland's Illustrated Medical Dictionary (33rd Edition)
-                - Stedman's Medical Dictionary (Latest Edition)
-                - NIH MedlinePlus Medical Terminology Tree
-                - PubMed MeSH Subject Headings 
-                
-                Chinese Terminology Library:
-                - National Committee for Terms in Sciences and Technologies - Medical Terms Series (2020 Edition)
-                - People's Medical Publishing House - English-Chinese Medical Dictionary (3rd Edition)
-                - NMPA (National Medical Products Administration) - Drug Naming Guidelines
-                - U.S. FDA Orange Book
-                - China NMPA Drug Review Center Database
-                - ClinicalTrials.gov Latest Trial Naming
-
-                Translation Guidelines:
-                1. Terminology Handling:
-                    - Prioritize WHO International Classification Standards (ICD-11/INN)
-                    - Chinese Herbal Names follow the Latin Nomenclature of the Chinese Pharmacopoeia
-                    - Molecular Targets follow HUGO Gene Nomenclature
-                2. Specialized Optimization: Cardiovascular Disease, Hematology
-
-                Translate the following markdown source text to {self.lang_out}. Keep the formula notation {{v*}} unchanged. Output translation directly without any additional text.
-
-                Source Text: {text}
-
-                Translated Text:""",
+                "content": TEMPLATE_PROMPT.format(text=text, lang_out=self.lang_out)
             },
         ]
 
@@ -399,9 +405,8 @@ class XinferenceTranslator(BaseTranslator):
         for model in self.model.split(";"):
             try:
                 xf_model = self.client.get_model(model)
-                logger.info(f"xf_model: {xf_model}")
                 xf_prompt = self.prompt(text, self.prompttext)
-                logger.info(f"pre xf_prompt: {xf_prompt}")
+                logger.debug(f"=========pre xf_prompt: {xf_prompt}")
                 xf_prompt = [
                     {
                         "role": "user",
@@ -410,7 +415,7 @@ class XinferenceTranslator(BaseTranslator):
                         # + xf_prompt[1]["content"],
                     }
                 ]
-                logger.info(f"post xf_prompt: {xf_prompt}")
+                logger.debug(f"post xf_prompt: {xf_prompt}")
 
                 response = xf_model.chat(
                     generate_config=self.options,
@@ -502,7 +507,7 @@ class AzureOpenAITranslator(BaseTranslator):
     name = "azure-openai"
     envs = {
         "AZURE_OPENAI_BASE_URL": "https://nnitasia-openai-01-ins.openai.azure.com/",  # e.g. "https://xxx.openai.azure.com"
-        "AZURE_OPENAI_API_KEY": None,
+        "AZURE_OPENAI_API_KEY": "7218515241f04d98b3b5d9869a25b91f",
         "AZURE_OPENAI_MODEL": "NNITAsia-GPT-4o",
         "AZURE_OPENAI_API_VERSION": "2024-06-01",  # default api version
     }
@@ -544,6 +549,7 @@ class AzureOpenAITranslator(BaseTranslator):
             **self.options,
             messages=self.prompt(text, self.prompttext),
         )
+        logger.info(f"pre prompttext: {self.prompt(text, self.prompttext)}")
         return response.choices[0].message.content.strip()
 
 

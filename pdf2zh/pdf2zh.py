@@ -23,7 +23,11 @@ from babeldoc.high_level import init as yadt_init
 from babeldoc.main import create_progress_handler
 
 from pdf2zh.high_level import analyze_pdf
-import io
+
+# A constant to represent the approximate number of tokens in the prompt template.
+# This value is used for time estimation.
+from pdf2zh.translator import TEMPLATE_PROMPT_TOKEN_COUNT
+
 
 logger = logging.getLogger(__name__)
 
@@ -333,19 +337,41 @@ def main(args: Optional[List[str]] = None) -> int:
                 model=ModelInstance.value,
                 pages=parsed_args.pages,
             )
+
+            # --- Start of Time Estimation Calculation ---
             total_paragraph_tokens = stats.get('total_paragraph_tokens', 0)
             total_table_tokens = stats.get('total_table_tokens', 0)
-            logger.info(f"Total Pages: {stats.get('page_count', 0)}")
-            logger.info(f"Total Paragraph Tokens: {total_paragraph_tokens}")
-            logger.info(f"Total Table Tokens: {total_table_tokens}")
-            logger.info(f"Total Estimated Tokens: {total_paragraph_tokens + total_table_tokens}")
-            logger.info("-" * 59)
+            total_paragraph_count = stats.get('total_paragraph_count', 0)
+            total_table_cell_count = stats.get('total_table_cell_count', 0)
+
+            # The calculation logic below is preserved exactly as provided.
+            actual_paragraph_tokens = total_paragraph_count + total_paragraph_count * TEMPLATE_PROMPT_TOKEN_COUNT
+            estimated_time_seconds = ((actual_paragraph_tokens + total_table_cell_count * TEMPLATE_PROMPT_TOKEN_COUNT) / 500 + total_paragraph_tokens / 20) / 3
+            # --- End of Time Estimation Calculation ---
+
+            # The primary output is the estimated time.
+            logger.info(f"Estimated Time: {estimated_time_seconds:.2f} seconds")
+
+            # All other detailed stats are logged at the DEBUG level.
+            logger.debug("-" * 59)
+            logger.debug(f"Total Pages: {stats.get('page_count', 0)}")
+            logger.debug(f"Total Paragraphs: {total_paragraph_count}")
+            logger.debug(f"Total Paragraph Tokens: {total_paragraph_tokens}")
+            logger.debug(f"Actual Paragraph Tokens (for estimation): {actual_paragraph_tokens}")
+            logger.debug(f"Total Table Cells: {total_table_cell_count}")
+            logger.debug(f"Total Table Tokens: {total_table_tokens}")
+            logger.debug(f"Total Estimated Content Tokens: {total_paragraph_tokens + total_table_tokens}")
+            logger.debug("-" * 59)
+            
             for page_num, page_data in stats.get('pages', {}).items():
-                logger.info(
+                paragraph_count = page_data.get('paragraph_count', 0)
+                table_cell_count = page_data.get('table_cell_count', 0)
+                table_token_count = page_data.get('table_token_count', 0)
+                logger.debug(
                     f"  - Page {page_num + 1}: "
-                    f"{page_data.get('paragraph_count', 0)} paragraphs ({page_data.get('paragraph_token_count', 0)} tokens) | "
+                    f"{paragraph_count} paragraphs ({page_data.get('paragraph_token_count', 0)} tokens) | "
                     f"{page_data.get('table_count', 0)} tables "
-                    f"({page_data.get('table_cell_count', 0)} cells, {page_data.get('table_token_count', 0)} tokens)"
+                    f"({table_cell_count} cells, {table_token_count} tokens)"
                 )
         except Exception as e:
             logger.error(f"An error occurred during PDF analysis: {e}", exc_info=True)
