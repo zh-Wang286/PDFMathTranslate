@@ -728,6 +728,69 @@ class TranslateConverter(PDFConverterEx):
             log.debug(f"< {y} {x} {x0} {x1} {size} {brk} > {sstk[id]} | {new}")
 
             ops_vals: list[dict] = []
+            
+            # [MODIFIED] 动态调整字号以适应翻译后的文本长度
+            final_size = size
+            final_lidx = 0
+            
+            def calculate_layout(font_size, text_to_layout, has_brk):
+                """预计算布局，返回需要的行数"""
+                _lidx = 0
+                _x = x0
+                _ptr = 0
+                _fcur_ = None
+                # 如果原文是单行，允许译文自动换行
+                if not has_brk:
+                    has_brk = True
+
+                while _ptr < len(text_to_layout):
+                    _vy_regex = re.match(r"\{\s*v([\d\s]+)\}", text_to_layout[_ptr:], re.IGNORECASE)
+                    if _vy_regex:
+                        _ptr += len(_vy_regex.group(0))
+                        try:
+                            _vid = int(_vy_regex.group(1).replace(" ", ""))
+                            _adv = vlen[_vid]
+                        except Exception:
+                            continue
+                    else:
+                        _ch = text_to_layout[_ptr]
+                        _fcur_ = None
+                        try:
+                            if self.fontmap["tiro"].to_unichr(ord(_ch)) == _ch: _fcur_ = "tiro"
+                        except Exception: pass
+                        if _fcur_ is None: _fcur_ = self.noto_name
+                        
+                        if _fcur_ == self.noto_name:
+                            _adv = self.noto.char_lengths(_ch, font_size)[0]
+                        else:
+                            _adv = self.fontmap[_fcur_].char_width(ord(_ch)) * font_size
+                        _ptr += 1
+                    
+                    if has_brk and _x + _adv > x1 + 0.1 * font_size and _x > x0:
+                        _x = x0
+                        _lidx += 1
+                    _x += _adv
+                return _lidx
+
+            # 迭代寻找合适的字号
+            # 首先，使用原始字号进行一次预计算
+            lidx = calculate_layout(final_size, new, brk)
+            required_height = (lidx + 1) * final_size * default_line_height
+
+            # 如果高度超出，则逐步减小字号
+            if required_height > height + size * 0.2: # 增加一点容忍度
+                 while final_size > 6: # 设置最小字号为6pt
+                    final_size -= 0.5
+                    lidx = calculate_layout(final_size, new, brk)
+                    required_height = (lidx + 1) * final_size * default_line_height
+                    if required_height <= height + final_size * 0.2:
+                        break # 找到合适的字号
+            
+            # 使用最终确定的字号和行数进行排版
+            size = final_size
+            lidx = 0 # 重置 lidx 给实际排版使用
+            if not brk: # 如果原文不换行，则强制换行
+                brk = True
 
             while ptr < len(new):
                 vy_regex = re.match(
@@ -774,7 +837,7 @@ class TranslateConverter(PDFConverterEx):
                             "lidx": lidx
                         })
                         cstk = ""
-                if brk and x + adv > x1 + 0.1 * size:  # 到达右边界且原文段落存在换行
+                if brk and x + adv > x1 + 0.1 * size and x > x0:  # 到达右边界且原文段落存sdDYPK8s1VzC在换行. x > x0 避免单字符就换行
                     x = x0
                     lidx += 1
                 if vy_regex:  # 插入公式

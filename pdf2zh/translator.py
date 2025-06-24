@@ -58,6 +58,8 @@ TEMPLATE_PROMPT = """
         - Molecular Targets follow HUGO Gene Nomenclature
     2. Specialized Optimization: Cardiovascular Disease, Hematology
 
+    Attention: If it's a Chinese-to-English translation, maintain simplicity while ensuring professionalism.
+    
     Translate the following markdown source text to {lang_out}. Keep the formula notation {{v*}} unchanged. Output translation directly without any additional text.
 
     Source Text: {text}
