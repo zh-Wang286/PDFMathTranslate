@@ -24,11 +24,13 @@ from babeldoc.main import create_progress_handler
 
 from pdf2zh.high_level import analyze_pdf
 
+# ==================================================
 # A constant to represent the approximate number of tokens in the prompt template.
 # This value is used for time estimation.
 from pdf2zh.translator import TEMPLATE_PROMPT_TOKEN_COUNT
 TPS = 60 # general model token per second
 AVG_THINK_CONTENT = 450 # thinking model token per second
+# ==================================================
 
 logger = logging.getLogger(__name__)
 
@@ -310,6 +312,10 @@ def print_analysis_report(stats: dict, estimated_time: float):
 
 
 def main(args: Optional[List[str]] = None) -> int:
+    import time
+    start_time = time.time()  # 记录开始时间
+    estimated_time = 0  # 初始化预估时间变量
+    
     from rich.logging import RichHandler
 
     logging.basicConfig(level=logging.INFO, handlers=[RichHandler()])
@@ -404,7 +410,7 @@ def main(args: Optional[List[str]] = None) -> int:
                 estimated_time = estimate_time_default(stats)
 
             # 输出估算时间
-            logger.info(f"Estimated Time: {estimated_time:.2f} seconds")
+            logger.info(f"Estimated processing time: {estimated_time:.2f} seconds")
             
             # 打印详细分析报告
             print_analysis_report(stats, estimated_time)
@@ -413,16 +419,36 @@ def main(args: Optional[List[str]] = None) -> int:
             logger.error(f"An error occurred during PDF analysis: {e}", exc_info=True)
         logger.info("="*59)
 
+    result = 0
     if parsed_args.babeldoc:
-        return yadt_main(parsed_args)
-    if parsed_args.dir:
+        result = yadt_main(parsed_args)
+    elif parsed_args.dir:
         untranlate_file = find_all_files_in_directory(parsed_args.files[0])
         parsed_args.files = untranlate_file
         translate(model=ModelInstance.value, **vars(parsed_args))
-        return 0
+    else:
+        translate(model=ModelInstance.value, **vars(parsed_args))
 
-    translate(model=ModelInstance.value, **vars(parsed_args))
-    return 0
+    # 计算并输出总运行时间
+    end_time = time.time()
+    actual_time = end_time - start_time
+    
+    # 输出时间对比报告
+    logger.info("="*20 + " Time Analysis Report " + "="*20)
+    if estimated_time > 0:
+        logger.info(f"Estimated time: {estimated_time:.2f} seconds")
+        logger.info(f"Actual time: {actual_time:.2f} seconds")
+        time_diff = actual_time - estimated_time
+        diff_percentage = (time_diff / estimated_time) * 100
+        if time_diff > 0:
+            logger.info(f"Difference: +{time_diff:.2f} seconds ({diff_percentage:.1f}% longer than estimated)")
+        else:
+            logger.info(f"Difference: {time_diff:.2f} seconds ({abs(diff_percentage):.1f}% shorter than estimated)")
+    else:
+        logger.info(f"Total execution time: {actual_time:.2f} seconds")
+    logger.info("="*59)
+    
+    return result
 
 
 def yadt_main(parsed_args) -> int:
