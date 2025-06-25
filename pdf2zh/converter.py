@@ -667,10 +667,13 @@ class TranslateConverter(PDFConverterEx):
         def worker(s: str):  # 多线程翻译
             if not s.strip() or re.match(r"^\{v\d+\}$", s):  # 空白和公式不翻译
                 return s
+            # 只翻译包含中文或英文字母的内容
+            if not re.search(r'[\u4e00-\u9fff]|[a-zA-Z]', s):
+                return s
             try:
-                # log.info(f"[段落翻译] 输入: '{s.strip()}'")
+                log.debug(f"[段落翻译] 输入: '{s.strip()}'")
                 new = self.translator.translate(s)
-                # log.info(f"[段落翻译] 输出: '{new.strip()}'")
+                log.debug(f"[段落翻译] 输出: '{new.strip()}'")
                 return new
             except BaseException as e:
                 if log.isEnabledFor(logging.DEBUG):

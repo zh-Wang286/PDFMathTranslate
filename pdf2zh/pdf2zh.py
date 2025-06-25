@@ -27,7 +27,8 @@ from pdf2zh.high_level import analyze_pdf
 # A constant to represent the approximate number of tokens in the prompt template.
 # This value is used for time estimation.
 from pdf2zh.translator import TEMPLATE_PROMPT_TOKEN_COUNT
-
+TPS = 60 # general model token per second
+AVG_THINK_CONTENT = 450 # thinking model token per second
 
 logger = logging.getLogger(__name__)
 
@@ -206,6 +207,13 @@ def create_parser() -> argparse.ArgumentParser:
         "--sse", action="store_true", help="Launch pdf2zh MCP server in SSE mode"
     )
 
+    parse_params.add_argument(
+        "--reasoning",
+        type=lambda x: x.lower() == 'true',
+        default=False,
+        help="Use alternative reasoning mode for time estimation (true/false).",
+    )
+
     return parser
 
 
@@ -248,6 +256,57 @@ def find_all_files_in_directory(directory_path):
                 file_paths.append(os.path.join(root, file))
 
     return file_paths
+
+
+def estimate_time_default(stats: dict) -> float:
+    """默认的时间估算逻辑"""
+    total_paragraph_tokens = stats.get('total_paragraph_tokens', 0)
+    total_table_tokens = stats.get('total_table_tokens', 0)
+    total_paragraph_count = stats.get('total_paragraph_count', 0)
+    total_table_cell_count = stats.get('total_table_cell_count', 0)
+
+    actual_paragraph_tokens = total_paragraph_tokens + total_paragraph_count * TEMPLATE_PROMPT_TOKEN_COUNT
+    actual_table_tokens = total_table_tokens + total_table_cell_count * TEMPLATE_PROMPT_TOKEN_COUNT
+    estimated_time_seconds = ((actual_paragraph_tokens + actual_table_tokens) / TPS ) / 3
+    
+    return estimated_time_seconds
+
+
+def estimate_time_reasoning(stats: dict) -> float:
+    """基于推理的时间估算逻辑"""
+    total_paragraph_tokens = stats.get('total_paragraph_tokens', 0)
+    total_table_tokens = stats.get('total_table_tokens', 0)
+    total_paragraph_count = stats.get('total_paragraph_count', 0)
+    total_table_cell_count = stats.get('total_table_cell_count', 0)
+
+    actual_paragraph_tokens = total_paragraph_tokens + total_paragraph_count * TEMPLATE_PROMPT_TOKEN_COUNT + total_paragraph_count * AVG_THINK_CONTENT
+    actual_table_tokens = total_table_tokens + total_table_cell_count * TEMPLATE_PROMPT_TOKEN_COUNT + total_table_cell_count * AVG_THINK_CONTENT
+    estimated_time_seconds = ((actual_paragraph_tokens + actual_table_tokens) / TPS ) / 3
+    return estimated_time_seconds
+
+
+def print_analysis_report(stats: dict, estimated_time: float):
+    """打印分析报告"""
+    logger.debug("-" * 59)
+    logger.debug(f"Total Pages: {stats.get('page_count', 0)}")
+    logger.debug(f"Total Paragraphs: {stats.get('total_paragraph_count', 0)}")
+    logger.debug(f"Total Paragraph Tokens: {stats.get('total_paragraph_tokens', 0)}")
+    logger.debug(f"Actual Paragraph Tokens (for estimation): {stats.get('total_paragraph_count', 0) + stats.get('total_paragraph_count', 0) * TEMPLATE_PROMPT_TOKEN_COUNT}")
+    logger.debug(f"Total Table Cells: {stats.get('total_table_cell_count', 0)}")
+    logger.debug(f"Total Table Tokens: {stats.get('total_table_tokens', 0)}")
+    logger.debug(f"Total Estimated Content Tokens: {stats.get('total_paragraph_tokens', 0) + stats.get('total_table_tokens', 0)}")
+    logger.debug("-" * 59)
+    
+    for page_num, page_data in stats.get('pages', {}).items():
+        paragraph_count = page_data.get('paragraph_count', 0)
+        table_cell_count = page_data.get('table_cell_count', 0)
+        table_token_count = page_data.get('table_token_count', 0)
+        logger.debug(
+            f"  - Page {page_num + 1}: "
+            f"{paragraph_count} paragraphs ({page_data.get('paragraph_token_count', 0)} tokens) | "
+            f"{page_data.get('table_count', 0)} tables "
+            f"({table_cell_count} cells, {table_token_count} tokens)"
+        )
 
 
 def main(args: Optional[List[str]] = None) -> int:
@@ -338,41 +397,18 @@ def main(args: Optional[List[str]] = None) -> int:
                 pages=parsed_args.pages,
             )
 
-            # --- Start of Time Estimation Calculation ---
-            total_paragraph_tokens = stats.get('total_paragraph_tokens', 0)
-            total_table_tokens = stats.get('total_table_tokens', 0)
-            total_paragraph_count = stats.get('total_paragraph_count', 0)
-            total_table_cell_count = stats.get('total_table_cell_count', 0)
+            # 根据不同的推理模式选择时间估算方法
+            if parsed_args.reasoning:
+                estimated_time = estimate_time_reasoning(stats)
+            else:
+                estimated_time = estimate_time_default(stats)
 
-            # The calculation logic below is preserved exactly as provided.
-            actual_paragraph_tokens = total_paragraph_count + total_paragraph_count * TEMPLATE_PROMPT_TOKEN_COUNT
-            estimated_time_seconds = ((actual_paragraph_tokens + total_table_cell_count * TEMPLATE_PROMPT_TOKEN_COUNT) / 500 + total_paragraph_tokens / 20) / 3
-            # --- End of Time Estimation Calculation ---
-
-            # The primary output is the estimated time.
-            logger.info(f"Estimated Time: {estimated_time_seconds:.2f} seconds")
-
-            # All other detailed stats are logged at the DEBUG level.
-            logger.debug("-" * 59)
-            logger.debug(f"Total Pages: {stats.get('page_count', 0)}")
-            logger.debug(f"Total Paragraphs: {total_paragraph_count}")
-            logger.debug(f"Total Paragraph Tokens: {total_paragraph_tokens}")
-            logger.debug(f"Actual Paragraph Tokens (for estimation): {actual_paragraph_tokens}")
-            logger.debug(f"Total Table Cells: {total_table_cell_count}")
-            logger.debug(f"Total Table Tokens: {total_table_tokens}")
-            logger.debug(f"Total Estimated Content Tokens: {total_paragraph_tokens + total_table_tokens}")
-            logger.debug("-" * 59)
+            # 输出估算时间
+            logger.info(f"Estimated Time: {estimated_time:.2f} seconds")
             
-            for page_num, page_data in stats.get('pages', {}).items():
-                paragraph_count = page_data.get('paragraph_count', 0)
-                table_cell_count = page_data.get('table_cell_count', 0)
-                table_token_count = page_data.get('table_token_count', 0)
-                logger.debug(
-                    f"  - Page {page_num + 1}: "
-                    f"{paragraph_count} paragraphs ({page_data.get('paragraph_token_count', 0)} tokens) | "
-                    f"{page_data.get('table_count', 0)} tables "
-                    f"({table_cell_count} cells, {table_token_count} tokens)"
-                )
+            # 打印详细分析报告
+            print_analysis_report(stats, estimated_time)
+
         except Exception as e:
             logger.error(f"An error occurred during PDF analysis: {e}", exc_info=True)
         logger.info("="*59)

@@ -7,6 +7,7 @@ import re
 import sys
 import tempfile
 import logging
+import time
 from asyncio import CancelledError
 from pathlib import Path
 from string import Template
@@ -452,6 +453,8 @@ def translate(
     ignore_cache: bool = False,
     **kwarg: Any,
 ):
+    start_time = time.time()  # 记录开始时间
+    
     if not files:
         raise PDFValueError("No files to process.")
 
@@ -527,6 +530,10 @@ def translate(
         doc_dual.close()
         result_files.append((str(file_mono), str(file_dual)))
 
+    end_time = time.time()  # 记录结束时间
+    total_time = end_time - start_time
+    logger.info(f"总翻译时间: {total_time:.2f} 秒")  # 记录总运行时间
+    
     return result_files
 
 

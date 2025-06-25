@@ -375,7 +375,7 @@ class XinferenceTranslator(BaseTranslator):
     name = "xinference"
     envs = {
         "XINFERENCE_HOST": "http://127.0.0.1:9997",
-        "XINFERENCE_MODEL": "deepseek-r1-distill-qwen",
+        "XINFERENCE_MODEL": "deepseek-r1-distill-qwen-0",
     }
     CustomPrompt = True
 
@@ -403,12 +403,12 @@ class XinferenceTranslator(BaseTranslator):
         return re.sub(r"^<think>.+?</think>", "", content, count=1, flags=re.DOTALL)
 
     def do_translate(self, text):
-        maxlen = max(2000, len(text) * 5)
+        maxlen = max(4000, len(text) * 5)
         for model in self.model.split(";"):
             try:
                 xf_model = self.client.get_model(model)
                 xf_prompt = self.prompt(text, self.prompttext)
-                logger.debug(f"=========pre xf_prompt: {xf_prompt}")
+                # logger.debug(f"=========pre xf_prompt: {xf_prompt}")
                 xf_prompt = [
                     {
                         "role": "user",
@@ -427,10 +427,10 @@ class XinferenceTranslator(BaseTranslator):
                 response = response["choices"][0]["message"]["content"].replace(
                     "<end_of_turn>", ""
                 )
-                content = self._remove_cot_content(response)
-                if len(content) > maxlen:
+                response = self._remove_cot_content(response)
+                if len(response) > maxlen:
                     raise Exception("Response too long")
-                return content.strip()
+                return response.strip()
             except Exception as e:
                 print(e)
         raise Exception("All models failed")
@@ -509,7 +509,7 @@ class AzureOpenAITranslator(BaseTranslator):
     name = "azure-openai"
     envs = {
         "AZURE_OPENAI_BASE_URL": "https://nnitasia-openai-01-ins.openai.azure.com/",  # e.g. "https://xxx.openai.azure.com"
-        "AZURE_OPENAI_API_KEY": "7218515241f04d98b3b5d9869a25b91f",
+        "AZURE_OPENAI_API_KEY": None,
         "AZURE_OPENAI_MODEL": "NNITAsia-GPT-4o",
         "AZURE_OPENAI_API_VERSION": "2024-06-01",  # default api version
     }
