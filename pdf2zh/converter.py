@@ -264,11 +264,13 @@ class AnalysisConverter(PDFConverterEx):
     A converter for analyzing PDF layout and content without translation.
     It counts pages, paragraphs, tables, cells, and tokens for both.
     """
-    def __init__(self, rsrcmgr, layout={}) -> None:
+    def __init__(self, rsrcmgr, layout={}, pages_to_process=None) -> None:
         super().__init__(rsrcmgr)
         self.layout = layout
+        self.pages_to_process = pages_to_process if pages_to_process is not None else []
+        self.processed_pages = set()  # 跟踪实际处理的页面
         self.stats = {
-            "page_count": 0,
+            "page_count": 0,  # 将在处理过程中更新
             "pages": {},
             "total_paragraph_tokens": 0,
             "total_table_tokens": 0,
@@ -277,6 +279,15 @@ class AnalysisConverter(PDFConverterEx):
         }
 
     def receive_layout(self, ltpage: LTPage):
+        # 如果指定了页面范围，且当前页面不在范围内，则跳过
+        if self.pages_to_process and ltpage.pageid not in self.pages_to_process:
+            return None
+            
+        # 记录这个页面已被处理
+        self.processed_pages.add(ltpage.pageid)
+        # 更新实际处理的页面数
+        self.stats["page_count"] = len(self.processed_pages)
+            
         page_items = list(ltpage)
         all_chars = [item for item in page_items if isinstance(item, LTChar)]
         all_lines = [item for item in page_items if isinstance(item, LTLine)]
@@ -386,7 +397,6 @@ class AnalysisConverter(PDFConverterEx):
         self.stats['total_table_tokens'] += table_token_count
         self.stats['total_paragraph_count'] += paragraph_count
         self.stats['total_table_cell_count'] += len(table_cells)
-        self.stats['page_count'] += 1
         return None
 
 

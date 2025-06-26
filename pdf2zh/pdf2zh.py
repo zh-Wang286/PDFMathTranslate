@@ -10,11 +10,13 @@ import logging
 import sys
 from string import Template
 from typing import List, Optional
+import time
+import os
+from datetime import datetime
 
 from pdf2zh import __version__, log
 from pdf2zh.high_level import translate, download_remote_fonts
 from pdf2zh.doclayout import OnnxModel, ModelInstance
-import os
 
 from pdf2zh.config import ConfigManager
 from babeldoc.translation_config import TranslationConfig as YadtConfig
@@ -65,7 +67,7 @@ def create_parser() -> argparse.ArgumentParser:
         "--pages",
         "-p",
         type=str,
-        help="The list of page numbers to parse.",
+        help="The list of page numbers to parse (1-based). Examples: '1' for first page, '1,2,3' for multiple pages, '1-3' for range.",
     )
     parse_params.add_argument(
         "--vfont",
@@ -196,6 +198,18 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     parse_params.add_argument(
+        "--analysis-only",
+        action="store_true",
+        help="分析PDF，不翻译",
+    )
+
+    parse_params.add_argument(
+        "--analysis-report",
+        action="store_true",
+        help="打印详细的分析报告",
+    )
+
+    parse_params.add_argument(
         "--ignore-cache",
         action="store_true",
         help="Ignore cache and force retranslation.",
@@ -261,54 +275,139 @@ def find_all_files_in_directory(directory_path):
 
 
 def estimate_time_default(stats: dict) -> float:
-    """默认的时间估算逻辑"""
+    """
+    估算处理时间（默认模式）
+    总时间 = 输入时间 + 输出时间
+    输入时间 = (段落token总数 + 段落数量*模板token + 表格token总数 + 表格单元格数量*模板token) / 100
+    输出时间 = (段落token总数 + 表格token总数) / TPS / 3
+    """
     total_paragraph_tokens = stats.get('total_paragraph_tokens', 0)
     total_table_tokens = stats.get('total_table_tokens', 0)
     total_paragraph_count = stats.get('total_paragraph_count', 0)
     total_table_cell_count = stats.get('total_table_cell_count', 0)
-
-    actual_paragraph_tokens = total_paragraph_tokens + total_paragraph_count * TEMPLATE_PROMPT_TOKEN_COUNT
-    actual_table_tokens = total_table_tokens + total_table_cell_count * TEMPLATE_PROMPT_TOKEN_COUNT
-    estimated_time_seconds = ((actual_paragraph_tokens + actual_table_tokens) / TPS ) / 3
     
+    # 计算输入时间
+    input_tokens = (total_paragraph_tokens + total_paragraph_count * TEMPLATE_PROMPT_TOKEN_COUNT + 
+                   total_table_tokens + total_table_cell_count * TEMPLATE_PROMPT_TOKEN_COUNT)
+    input_time = input_tokens / 100
+    
+    # 计算输出时间
+    output_tokens = total_paragraph_tokens + total_table_tokens
+    output_time = output_tokens / TPS / 3
+    
+    # 总时间
+    estimated_time_seconds = input_time + output_time
+    
+    logger.debug(f"Input time: {input_time:.2f}s, Output time: {output_time:.2f}s")
     return estimated_time_seconds
 
 
 def estimate_time_reasoning(stats: dict) -> float:
-    """基于推理的时间估算逻辑"""
+    """
+    估算处理时间（推理模式）
+    总时间 = 输入时间 + 输出时间
+    输入时间 = (段落token总数 + 段落数量*模板token + 表格token总数 + 表格单元格数量*模板token) / 100
+    输出时间 = (段落token总数 + 段落数量*思考token + 表格token总数 + 表格单元格数量*思考token) / TPS / 2
+    """
     total_paragraph_tokens = stats.get('total_paragraph_tokens', 0)
     total_table_tokens = stats.get('total_table_tokens', 0)
     total_paragraph_count = stats.get('total_paragraph_count', 0)
     total_table_cell_count = stats.get('total_table_cell_count', 0)
-
-    actual_paragraph_tokens = total_paragraph_tokens + total_paragraph_count * TEMPLATE_PROMPT_TOKEN_COUNT + total_paragraph_count * AVG_THINK_CONTENT
-    actual_table_tokens = total_table_tokens + total_table_cell_count * TEMPLATE_PROMPT_TOKEN_COUNT + total_table_cell_count * AVG_THINK_CONTENT
-    estimated_time_seconds = ((actual_paragraph_tokens + actual_table_tokens) / TPS ) / 3
+    
+    # 计算输入时间
+    input_tokens = (total_paragraph_tokens + total_paragraph_count * TEMPLATE_PROMPT_TOKEN_COUNT + 
+                   total_table_tokens + total_table_cell_count * TEMPLATE_PROMPT_TOKEN_COUNT)
+    input_time = input_tokens / 100
+    
+    # 计算输出时间（包含思考token）
+    output_tokens = (total_paragraph_tokens + total_paragraph_count * AVG_THINK_CONTENT + 
+                    total_table_tokens + total_table_cell_count * AVG_THINK_CONTENT)
+    output_time = output_tokens / TPS / 2
+    
+    # 总时间
+    estimated_time_seconds = input_time + output_time
+    
+    logger.debug(f"Input time: {input_time:.2f}s, Output time: {output_time:.2f}s")
     return estimated_time_seconds
 
 
-def print_analysis_report(stats: dict, estimated_time: float):
-    """打印分析报告"""
-    logger.debug("-" * 59)
-    logger.debug(f"Total Pages: {stats.get('page_count', 0)}")
-    logger.debug(f"Total Paragraphs: {stats.get('total_paragraph_count', 0)}")
-    logger.debug(f"Total Paragraph Tokens: {stats.get('total_paragraph_tokens', 0)}")
-    logger.debug(f"Actual Paragraph Tokens (for estimation): {stats.get('total_paragraph_count', 0) + stats.get('total_paragraph_count', 0) * TEMPLATE_PROMPT_TOKEN_COUNT}")
-    logger.debug(f"Total Table Cells: {stats.get('total_table_cell_count', 0)}")
-    logger.debug(f"Total Table Tokens: {stats.get('total_table_tokens', 0)}")
-    logger.debug(f"Total Estimated Content Tokens: {stats.get('total_paragraph_tokens', 0) + stats.get('total_table_tokens', 0)}")
-    logger.debug("-" * 59)
-    
-    for page_num, page_data in stats.get('pages', {}).items():
-        paragraph_count = page_data.get('paragraph_count', 0)
-        table_cell_count = page_data.get('table_cell_count', 0)
-        table_token_count = page_data.get('table_token_count', 0)
-        logger.debug(
+def print_analysis_report(stats: dict, estimated_time: float, to_console: bool = False):
+    """打印分析报告。如果 to_console 为 True，则打印到控制台，否则使用 debug 日志。"""
+    output_func = print if to_console else logger.debug
+
+    if to_console:
+        title = " PDF Analysis Report "
+        separator = "=" * ((59 - len(title)) // 2)
+        header = f"{separator}{title}{separator}"
+        output_func(header)
+    else:
+        output_func("-" * 59)
+
+    output_func(f"Total Pages: {stats.get('page_count', 0)}")
+    output_func(f"Total Paragraphs: {stats.get('total_paragraph_count', 0)}")
+    output_func(f"Total Paragraph Tokens: {stats.get('total_paragraph_tokens', 0)}")
+    output_func(
+        f"Actual Paragraph Tokens (for estimation): {stats.get('total_paragraph_count', 0) + stats.get('total_paragraph_count', 0) * TEMPLATE_PROMPT_TOKEN_COUNT}"
+    )
+    output_func(f"Total Table Cells: {stats.get('total_table_cell_count', 0)}")
+    output_func(f"Total Table Tokens: {stats.get('total_table_tokens', 0)}")
+    output_func(f"Total Estimated Content Tokens: {stats.get('total_paragraph_tokens', 0) + stats.get('total_table_tokens', 0)}")
+    output_func("-" * 59)
+
+    if to_console:
+        output_func("Page-by-page breakdown:")
+
+    for page_num, page_data in stats.get("pages", {}).items():
+        paragraph_count = page_data.get("paragraph_count", 0)
+        table_cell_count = page_data.get("table_cell_count", 0)
+        table_token_count = page_data.get("table_token_count", 0)
+        output_func(
             f"  - Page {page_num + 1}: "
             f"{paragraph_count} paragraphs ({page_data.get('paragraph_token_count', 0)} tokens) | "
             f"{page_data.get('table_count', 0)} tables "
             f"({table_cell_count} cells, {table_token_count} tokens)"
         )
+
+    if to_console:
+        output_func("=" * 59)
+
+
+def save_time_log(file_path: str, estimated_time: float, actual_time: float) -> None:
+    """保存时间日志到文件
+
+    Args:
+        file_path: PDF文件路径
+        estimated_time: 预估时间
+        actual_time: 实际时间
+    """
+    try:
+        # 获取PDF文件名（不含路径和扩展名）
+        pdf_name = os.path.splitext(os.path.basename(file_path))[0]
+        # 生成日志文件名：PDF文件名_时间戳.log
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_filename = f"{pdf_name}_{timestamp}.log"
+        
+        # 计算时间差异
+        time_diff = actual_time - estimated_time
+        diff_percentage = (time_diff / estimated_time) * 100 if estimated_time > 0 else 0
+        
+        # 写入日志文件
+        with open(log_filename, "w", encoding="utf-8") as f:
+            f.write("PDF翻译时间分析报告\n")
+            f.write("=" * 50 + "\n")
+            f.write(f"文件名: {file_path}\n")
+            f.write(f"开始时间: {datetime.fromtimestamp(time.time() - actual_time).strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"结束时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write("-" * 50 + "\n")
+            f.write(f"预估时间: {estimated_time:.2f} 秒\n")
+            f.write(f"实际时间: {actual_time:.2f} 秒\n")
+            f.write(f"时间偏差: {time_diff:+.2f} 秒\n")
+            f.write(f"偏差百分比: {diff_percentage:+.1f}%\n")
+            f.write("=" * 50 + "\n")
+        
+        logger.info(f"时间分析报告已保存到: {log_filename}")
+    except Exception as e:
+        logger.error(f"保存时间日志时发生错误: {e}")
 
 
 def main(args: Optional[List[str]] = None) -> int:
@@ -413,11 +512,16 @@ def main(args: Optional[List[str]] = None) -> int:
             logger.info(f"Estimated processing time: {estimated_time:.2f} seconds")
             
             # 打印详细分析报告
-            print_analysis_report(stats, estimated_time)
+            print_analysis_report(stats, estimated_time, parsed_args.analysis_report)
 
         except Exception as e:
             logger.error(f"An error occurred during PDF analysis: {e}", exc_info=True)
         logger.info("="*59)
+
+    # 如果只需要分析，则在这里返回
+    if parsed_args.analysis_only:
+        logger.info("Analysis completed. Skipping translation as --analysis-only was specified.")
+        return 0
 
     result = 0
     if parsed_args.babeldoc:
@@ -444,6 +548,10 @@ def main(args: Optional[List[str]] = None) -> int:
             logger.info(f"Difference: +{time_diff:.2f} seconds ({diff_percentage:.1f}% longer than estimated)")
         else:
             logger.info(f"Difference: {time_diff:.2f} seconds ({abs(diff_percentage):.1f}% shorter than estimated)")
+        
+        # 保存时间日志
+        if parsed_args.files and len(parsed_args.files) > 0:
+            save_time_log(parsed_args.files[0], estimated_time, actual_time)
     else:
         logger.info(f"Total execution time: {actual_time:.2f} seconds")
     logger.info("="*59)

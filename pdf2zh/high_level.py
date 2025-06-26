@@ -83,7 +83,7 @@ def analyze_pdf(
 
     rsrcmgr = PDFResourceManager()
     layout = {}
-    device = AnalysisConverter(rsrcmgr, layout)
+    device = AnalysisConverter(rsrcmgr, layout, pages)
     interpreter = PDFPageInterpreterEx(rsrcmgr, device, {})
 
     parser = PDFParser(inf_for_pdfminer)
