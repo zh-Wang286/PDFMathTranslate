@@ -473,10 +473,9 @@ def translate(
     prompt: Template = None,
     skip_subset_fonts: bool = False,
     ignore_cache: bool = False,
+    stats_obj: Optional[Any] = None,  # 添加统计对象参数
     **kwarg: Any,
 ):
-    start_time = time.time()  # 记录开始时间
-    
     if not files:
         raise PDFValueError("No files to process.")
 
@@ -512,6 +511,10 @@ def translate(
         "skipped_no_text": 0,
         "translated": 0,
     }
+
+    # 如果传入了统计对象，则开始跟踪翻译时间
+    if stats_obj:
+        stats_obj.start_translation_tracking()
 
     result_files = []
     
@@ -591,43 +594,51 @@ def translate(
         doc_dual.close()
         result_files.append((str(file_mono), str(file_dual)))
 
-    end_time = time.time()  # 记录结束时间
-    total_time = end_time - start_time
-    logger.info(f"总翻译时间: {total_time:.2f} 秒")  # 记录总运行时间
-    
-    # 输出token统计报告
-    if total_token_stats["translation_count"] > 0:
-        logger.info("=" * 20 + " Translation Token Report " + "=" * 20)
-        logger.info(f"总翻译调用次数: {total_token_stats['translation_count']}")
-        logger.info(f"总输入Token数: {total_token_stats['prompt_tokens']}")
-        logger.info(f"总输出Token数: {total_token_stats['completion_tokens']}")
-        logger.info(f"总Token使用量: {total_token_stats['total_tokens']}")
-        if total_token_stats['translation_count'] > 0:
-            logger.info(f"平均每次翻译Token数: {total_token_stats['total_tokens'] / total_token_stats['translation_count']:.1f}")
-        logger.info("=" * 67)
-    
-    # 输出段落统计报告
-    if total_paragraph_stats["total_paragraphs"] > 0:
-        logger.info("=" * 20 + " Paragraph Statistics Report " + "=" * 20)
-        logger.info(f"总段落数: {total_paragraph_stats['total_paragraphs']}")
-        logger.info(f"已翻译段落: {total_paragraph_stats['translated']}")
-        logger.info(f"跳过的段落:")
-        logger.info(f"  - 空白段落: {total_paragraph_stats['skipped_empty']}")
-        logger.info(f"  - 公式段落: {total_paragraph_stats['skipped_formula']}")
-        logger.info(f"  - 无中英文段落: {total_paragraph_stats['skipped_no_text']}")
-        logger.info("=" * 67)
+    # 结束翻译时间跟踪
+    if stats_obj:
+        stats_obj.end_translation_tracking()
+
+    # 如果没有统计对象，则输出原有的统计报告
+    if not stats_obj:
+        # 输出token统计报告
+        if total_token_stats["translation_count"] > 0:
+            logger.info("=" * 20 + " Translation Token Report " + "=" * 20)
+            logger.info(f"总翻译调用次数: {total_token_stats['translation_count']}")
+            logger.info(f"总输入Token数: {total_token_stats['prompt_tokens']}")
+            logger.info(f"总输出Token数: {total_token_stats['completion_tokens']}")
+            logger.info(f"总Token使用量: {total_token_stats['total_tokens']}")
+            if total_token_stats['translation_count'] > 0:
+                logger.info(f"平均每次翻译Token数: {total_token_stats['total_tokens'] / total_token_stats['translation_count']:.1f}")
+            logger.info("=" * 67)
         
-    # 输出表格统计报告
-    if total_table_stats["total_cells"] > 0:
-        logger.info("=" * 20 + " Table Statistics Report " + "=" * 20)
-        logger.info(f"总单元格数: {total_table_stats['total_cells']}")
-        logger.info(f"已翻译单元格: {total_table_stats['translated']}")
-        logger.info(f"跳过的单元格:")
-        logger.info(f"  - 空白单元格: {total_table_stats['skipped_empty']}")
-        logger.info(f"  - 无中英文单元格: {total_table_stats['skipped_no_text']}")
-        logger.info("=" * 67)
+        # 输出段落统计报告
+        if total_paragraph_stats["total_paragraphs"] > 0:
+            logger.info("=" * 20 + " Paragraph Statistics Report " + "=" * 20)
+            logger.info(f"总段落数: {total_paragraph_stats['total_paragraphs']}")
+            logger.info(f"已翻译段落: {total_paragraph_stats['translated']}")
+            logger.info(f"跳过的段落:")
+            logger.info(f"  - 空白段落: {total_paragraph_stats['skipped_empty']}")
+            logger.info(f"  - 公式段落: {total_paragraph_stats['skipped_formula']}")
+            logger.info(f"  - 无中英文段落: {total_paragraph_stats['skipped_no_text']}")
+            logger.info("=" * 67)
+            
+        # 输出表格统计报告
+        if total_table_stats["total_cells"] > 0:
+            logger.info("=" * 20 + " Table Statistics Report " + "=" * 20)
+            logger.info(f"总单元格数: {total_table_stats['total_cells']}")
+            logger.info(f"已翻译单元格: {total_table_stats['translated']}")
+            logger.info(f"跳过的单元格:")
+            logger.info(f"  - 空白单元格: {total_table_stats['skipped_empty']}")
+            logger.info(f"  - 无中英文单元格: {total_table_stats['skipped_no_text']}")
+            logger.info("=" * 67)
     
-    return result_files
+    # 根据是否有统计对象返回不同格式
+    if stats_obj:
+        # 返回结果文件和统计信息（用于新的统计系统）
+        return result_files, total_token_stats, total_paragraph_stats, total_table_stats
+    else:
+        # 返回原有格式（兼容原有调用）
+        return result_files
 
 
 def download_remote_fonts(lang: str):

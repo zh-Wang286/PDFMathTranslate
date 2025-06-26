@@ -25,6 +25,7 @@ from babeldoc.high_level import init as yadt_init
 from babeldoc.main import create_progress_handler
 
 from pdf2zh.high_level import analyze_pdf
+from pdf2zh.statistics import perform_pre_analysis, collect_runtime_stats, PDFTranslationStatistics
 
 # ==================================================
 # A constant to represent the approximate number of tokens in the prompt template.
@@ -274,201 +275,8 @@ def find_all_files_in_directory(directory_path):
     return file_paths
 
 
-def estimate_time_default(stats: dict) -> float:
-    """
-    估算处理时间（默认模式）
-    总时间 = 输入时间 + 输出时间
-    输入时间 = (段落token总数 + 段落数量*模板token + 表格token总数 + 表格单元格数量*模板token) / 100
-    输出时间 = (段落token总数 + 表格token总数) / TPS / 3
-    """
-    total_paragraph_tokens = stats.get('total_paragraph_tokens', 0)
-    total_table_tokens = stats.get('total_table_tokens', 0)
-    total_paragraph_count = stats.get('total_paragraph_count', 0)
-    total_table_cell_count = stats.get('total_table_cell_count', 0)
-    
-    # 计算输入时间
-    input_tokens = (total_paragraph_tokens + total_paragraph_count * TEMPLATE_PROMPT_TOKEN_COUNT + 
-                   total_table_tokens + total_table_cell_count * TEMPLATE_PROMPT_TOKEN_COUNT)
-    input_time = input_tokens / 100
-    
-    # 计算输出时间
-    output_tokens = total_paragraph_tokens + total_table_tokens
-    output_time = output_tokens / TPS / 3
-    
-    # 总时间
-    estimated_time_seconds = input_time + output_time
-    
-    logger.debug(f"Input time: {input_time:.2f}s, Output time: {output_time:.2f}s")
-    return estimated_time_seconds
-
-
-def estimate_time_reasoning(stats: dict) -> float:
-    """
-    估算处理时间（推理模式）
-    总时间 = 输入时间 + 输出时间
-    输入时间 = (段落token总数 + 段落数量*模板token + 表格token总数 + 表格单元格数量*模板token) / 100
-    输出时间 = (段落token总数 + 段落数量*思考token + 表格token总数 + 表格单元格数量*思考token) / TPS / 2
-    """
-    total_paragraph_tokens = stats.get('total_paragraph_tokens', 0)
-    total_table_tokens = stats.get('total_table_tokens', 0)
-    total_paragraph_count = stats.get('total_paragraph_count', 0)
-    total_table_cell_count = stats.get('total_table_cell_count', 0)
-    
-    # 计算输入时间
-    input_tokens = (total_paragraph_tokens + total_paragraph_count * TEMPLATE_PROMPT_TOKEN_COUNT + 
-                   total_table_tokens + total_table_cell_count * TEMPLATE_PROMPT_TOKEN_COUNT)
-    input_time = input_tokens / 100
-    
-    # 计算输出时间（包含思考token）
-    output_tokens = (total_paragraph_tokens + total_paragraph_count * AVG_THINK_CONTENT + 
-                    total_table_tokens + total_table_cell_count * AVG_THINK_CONTENT)
-    output_time = output_tokens / TPS / 2
-    
-    # 总时间
-    estimated_time_seconds = input_time + output_time
-    
-    logger.debug(f"Input time: {input_time:.2f}s, Output time: {output_time:.2f}s")
-    return estimated_time_seconds
-
-
-def print_analysis_report(stats: dict, estimated_time: float, to_console: bool = False):
-    """打印分析报告。如果 to_console 为 True，则打印到控制台，否则使用 debug 日志。"""
-    output_func = print if to_console else logger.debug
-
-    # 写入标题
-    title = " PDF Translation Analysis Report "
-    separator = "=" * ((59 - len(title)) // 2)
-    header = f"{separator}{title}{separator}"
-    output_func(header)
-    
-    # 写入基本统计信息
-    output_func("\n1. Content Statistics")
-    output_func("-" * 59)
-    output_func(f"Total Pages: {stats.get('page_count', 0)}")
-    output_func(f"Total Paragraphs: {stats.get('total_paragraph_count', 0)}")
-    output_func(f"Total Paragraph Tokens: {stats.get('total_paragraph_tokens', 0)}")
-    output_func(
-        f"Actual Paragraph Tokens (for estimation): {stats.get('total_paragraph_count', 0) + stats.get('total_paragraph_count', 0) * TEMPLATE_PROMPT_TOKEN_COUNT}"
-    )
-    output_func(f"Total Table Cells: {stats.get('total_table_cell_count', 0)}")
-    output_func(f"Total Table Tokens: {stats.get('total_table_tokens', 0)}")
-    output_func(f"Total Estimated Content Tokens: {stats.get('total_paragraph_tokens', 0) + stats.get('total_table_tokens', 0)}")
-    
-    # 写入页面详细信息
-    output_func("\n2. Page Details")
-    output_func("-" * 59)
-    for page_num, page_data in stats.get("pages", {}).items():
-        paragraph_count = page_data.get("paragraph_count", 0)
-        table_count = page_data.get("table_count", 0)
-        table_cell_count = page_data.get("table_cell_count", 0)
-        table_token_count = page_data.get("table_token_count", 0)
-        output_func(
-            f"Page {page_num + 1}: "
-            f"{paragraph_count} paragraphs ({page_data.get('paragraph_token_count', 0)} tokens) | "
-            f"{table_count} tables "
-            f"({table_cell_count} cells, {table_token_count} tokens)"
-        )
-
-    if to_console:
-        output_func("=" * 59)
-
-
-def save_time_log(file_path: str, estimated_time: float, actual_time: float) -> None:
-    """保存时间日志到文件
-
-    Args:
-        file_path: PDF文件路径
-        estimated_time: 预估时间
-        actual_time: 实际时间
-    """
-    try:
-        # 获取PDF文件名（不含路径和扩展名）
-        pdf_name = os.path.splitext(os.path.basename(file_path))[0]
-        # 生成日志文件名：PDF文件名_时间戳.log
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_filename = f"{pdf_name}_{timestamp}.log"
-        
-        # 计算时间差异
-        time_diff = actual_time - estimated_time
-        diff_percentage = (time_diff / estimated_time) * 100 if estimated_time > 0 else 0
-        
-        # 写入日志文件
-        with open(log_filename, "w", encoding="utf-8") as f:
-            f.write("PDF翻译时间分析报告\n")
-            f.write("=" * 50 + "\n")
-            f.write(f"文件名: {file_path}\n")
-            f.write(f"开始时间: {datetime.fromtimestamp(time.time() - actual_time).strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"结束时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write("-" * 50 + "\n")
-            f.write(f"预估时间: {estimated_time:.2f} 秒\n")
-            f.write(f"实际时间: {actual_time:.2f} 秒\n")
-            f.write(f"时间偏差: {time_diff:+.2f} 秒\n")
-            f.write(f"偏差百分比: {diff_percentage:+.1f}%\n")
-            f.write("=" * 50 + "\n")
-        
-        logger.info(f"时间分析报告已保存到: {log_filename}")
-    except Exception as e:
-        logger.error(f"保存时间日志时发生错误: {e}")
-
-
-def save_analysis_report(stats: dict, estimated_time: float, actual_time: float, filename: str):
-    """保存分析报告到文件。"""
-    with open(filename, 'w', encoding='utf-8') as f:
-        # 写入标题
-        title = " PDF Translation Analysis Report "
-        separator = "=" * ((59 - len(title)) // 2)
-        header = f"{separator}{title}{separator}\n"
-        f.write(header)
-        
-        # 写入基本统计信息
-        f.write("\n1. Content Statistics\n")
-        f.write("-" * 59 + "\n")
-        f.write(f"Total Pages: {stats.get('page_count', 0)}\n")
-        f.write(f"Total Paragraphs: {stats.get('total_paragraph_count', 0)}\n")
-        f.write(f"Total Paragraph Tokens: {stats.get('total_paragraph_tokens', 0)}\n")
-        f.write(
-            f"Actual Paragraph Tokens (for estimation): {stats.get('total_paragraph_count', 0) + stats.get('total_paragraph_count', 0) * TEMPLATE_PROMPT_TOKEN_COUNT}\n"
-        )
-        f.write(f"Total Table Cells: {stats.get('total_table_cell_count', 0)}\n")
-        f.write(f"Total Table Tokens: {stats.get('total_table_tokens', 0)}\n")
-        f.write(f"Total Estimated Content Tokens: {stats.get('total_paragraph_tokens', 0) + stats.get('total_table_tokens', 0)}\n")
-        
-        # 写入页面详细信息
-        f.write("\n2. Page Details\n")
-        f.write("-" * 59 + "\n")
-        for page_num, page_data in stats.get("pages", {}).items():
-            paragraph_count = page_data.get("paragraph_count", 0)
-            table_count = page_data.get("table_count", 0)
-            table_cell_count = page_data.get("table_cell_count", 0)
-            table_token_count = page_data.get("table_token_count", 0)
-            f.write(
-                f"Page {page_num + 1}: "
-                f"{paragraph_count} paragraphs ({page_data.get('paragraph_token_count', 0)} tokens) | "
-                f"{table_count} tables "
-                f"({table_cell_count} cells, {table_token_count} tokens)\n"
-            )
-            
-        # 写入时间分析
-        f.write("\n3. Time Analysis\n")
-        f.write("-" * 59 + "\n")
-        f.write(f"Estimated Processing Time: {estimated_time:.2f} seconds\n")
-        f.write(f"Actual Processing Time: {actual_time:.2f} seconds\n")
-        difference = actual_time - estimated_time
-        percentage = abs(difference) / estimated_time * 100
-        if difference > 0:
-            f.write(f"Time Difference: +{difference:.2f} seconds ({percentage:.1f}% longer than estimated)\n")
-        else:
-            f.write(f"Time Difference: {difference:.2f} seconds ({percentage:.1f}% shorter than estimated)\n")
-            
-        # 写入结尾分隔符
-        f.write("\n" + "=" * 59 + "\n")
-        f.write(f"Report generated at: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-
-
 def main(args: Optional[List[str]] = None) -> int:
     import time
-    start_time = time.time()  # 记录开始时间
-    estimated_time = 0  # 初始化预估时间变量
     
     from rich.logging import RichHandler
 
@@ -544,111 +352,180 @@ def main(args: Optional[List[str]] = None) -> int:
 
     print(parsed_args)
 
-    # Perform analysis before translation
-    if not parsed_args.babeldoc and parsed_args.files:
-        logger.info("="*20 + " PDF Analysis Report " + "="*20)
-        try:
-            with open(parsed_args.files[0], "rb") as f:
-                pdf_bytes = f.read()
-
-            stats = analyze_pdf(
-                pdf_bytes=pdf_bytes,
-                model=ModelInstance.value,
-                pages=parsed_args.pages,
-            )
-
-            # 根据不同的推理模式选择时间估算方法
-            if parsed_args.reasoning:
-                estimated_time = estimate_time_reasoning(stats)
-            else:
-                estimated_time = estimate_time_default(stats)
-
-            # 输出估算时间
-            logger.info(f"Estimated processing time: {estimated_time:.2f} seconds")
-            
-            # 打印详细分析报告
-            print_analysis_report(stats, estimated_time, parsed_args.analysis_report)
-
-        except Exception as e:
-            logger.error(f"An error occurred during PDF analysis: {e}", exc_info=True)
-        logger.info("="*59)
-
-    # 如果只需要分析，则在这里返回
-    if parsed_args.analysis_only:
-        logger.info("Analysis completed. Skipping translation as --analysis-only was specified.")
-        return 0
+    # 初始化统计对象
+    stats_obj: Optional[PDFTranslationStatistics] = None
+    
+    # 检查是否需要统计功能
+    needs_statistics = (
+        parsed_args.analysis_only or 
+        parsed_args.analysis_report or 
+        getattr(parsed_args, 'statistics', False)  # 为未来可能的统计参数预留
+    )
 
     result = 0
-    if parsed_args.babeldoc:
-        result = yadt_main(parsed_args)
-    elif parsed_args.dir:
-        untranlate_file = find_all_files_in_directory(parsed_args.files[0])
-        parsed_args.files = untranlate_file
-        translate(model=ModelInstance.value, **vars(parsed_args))
-    else:
-        translate(model=ModelInstance.value, **vars(parsed_args))
 
-    # 计算并输出总运行时间
-    end_time = time.time()
-    actual_time = end_time - start_time
-    
-    # 输出时间对比报告
-    logger.info("="*20 + " Time Analysis Report " + "="*20)
-    if estimated_time > 0:
-        logger.info(f"Estimated time: {estimated_time:.2f} seconds")
-        logger.info(f"Actual time: {actual_time:.2f} seconds")
-        time_diff = actual_time - estimated_time
-        diff_percentage = (time_diff / estimated_time) * 100
-        if time_diff > 0:
-            logger.info(f"Difference: +{time_diff:.2f} seconds ({diff_percentage:.1f}% longer than estimated)")
+    try:
+        # 开始运行时统计跟踪
+        if needs_statistics:
+            stats_obj = PDFTranslationStatistics()
+            stats_obj.start_runtime_tracking()
+            if parsed_args.files:
+                stats_obj.set_input_files(parsed_args.files)
+
+        if parsed_args.analysis_only:
+            # 仅分析模式
+            if not parsed_args.files:
+                logger.error("分析模式需要指定输入文件")
+                return 1
+                
+            logger.info("开始PDF分析模式...")
+            
+            # 读取文件内容
+            file_contents = read_inputs(parsed_args.files)
+            
+            # 执行预分析
+            for i, pdf_bytes in enumerate(file_contents):
+                logger.info(f"分析文件 {i+1}/{len(file_contents)}: {parsed_args.files[i]}")
+                
+                # 检查是否为推理模式
+                is_reasoning = getattr(parsed_args, 'reasoning', False) or (
+                    hasattr(parsed_args, 'service') and 
+                    any(reasoning_service in parsed_args.service.lower() 
+                        for reasoning_service in ['r1', 'reasoning', 'think', 'o1'])
+                )
+                
+                current_stats = perform_pre_analysis(
+                    pdf_bytes=pdf_bytes,
+                    model=ModelInstance.value,
+                    pages=parsed_args.pages,
+                    is_reasoning=is_reasoning,
+                    cancellation_event=None
+                )
+                
+                if i == 0:
+                    stats_obj = current_stats
+                    stats_obj.set_input_files(parsed_args.files)
+                else:
+                    # 合并多个文件的统计信息
+                    # 这里简化处理，实际可以考虑更复杂的合并逻辑
+                    pass
+                    
+            logger.info("PDF分析完成")
+            
+        elif parsed_args.babeldoc:
+            result = yadt_main(parsed_args)
+        elif parsed_args.dir:
+            untranlate_file = find_all_files_in_directory(parsed_args.files[0])
+            parsed_args.files = untranlate_file
+            
+            # 如果需要统计，先执行预分析
+            if needs_statistics and parsed_args.files:
+                logger.info("执行预处理分析...")
+                
+                # 读取第一个文件进行分析（简化处理）
+                with open(parsed_args.files[0], 'rb') as f:
+                    pdf_bytes = f.read()
+                
+                # 检查是否为推理模式
+                is_reasoning = getattr(parsed_args, 'reasoning', False) or (
+                    hasattr(parsed_args, 'service') and 
+                    any(reasoning_service in parsed_args.service.lower() 
+                        for reasoning_service in ['r1', 'reasoning', 'think', 'o1'])
+                )
+                
+                stats_obj = perform_pre_analysis(
+                    pdf_bytes=pdf_bytes,
+                    model=ModelInstance.value,
+                    pages=parsed_args.pages,
+                    is_reasoning=is_reasoning,
+                    cancellation_event=None
+                )
+                stats_obj.set_input_files(parsed_args.files)
+            
+            # 执行翻译
+            if needs_statistics:
+                translation_result = translate(model=ModelInstance.value, stats_obj=stats_obj, **vars(parsed_args))
+                # 处理翻译结果
+                if isinstance(translation_result, tuple) and len(translation_result) >= 4:
+                    result_files, token_stats, paragraph_stats, table_stats = translation_result[:4]
+                    # 收集运行时统计
+                    stats_obj = collect_runtime_stats(stats_obj, token_stats, paragraph_stats, table_stats)
+            else:
+                # 标准调用，不需要统计
+                translate(model=ModelInstance.value, **vars(parsed_args))
+            
         else:
-            logger.info(f"Difference: {time_diff:.2f} seconds ({abs(diff_percentage):.1f}% shorter than estimated)")
-        
-        # 保存时间日志
-        if parsed_args.files and len(parsed_args.files) > 0:
-            save_time_log(parsed_args.files[0], estimated_time, actual_time)
-    else:
-        logger.info(f"Total execution time: {actual_time:.2f} seconds")
-    logger.info("="*59)
-    
-    # 保存时间分析报告
-    if parsed_args.analysis_report:
-        try:
-            # 使用第一个文件名作为基础
-            base_filename = os.path.splitext(os.path.basename(parsed_args.files[0]))[0]
-            # 生成报告文件名：原文件名_YYYYMMDD_HHMMSS_analysis.txt
-            report_filename = f"{base_filename}_{time.strftime('%Y%m%d_%H%M%S')}_analysis.txt"
-            save_analysis_report(stats, estimated_time, actual_time, report_filename)
-            logger.info(f"分析报告已保存到: {report_filename}")
-        except Exception as e:
-            logger.error(f"保存分析报告时发生错误: {e}")
+            # 标准翻译模式
+            if needs_statistics and parsed_args.files:
+                logger.info("执行预处理分析...")
+                
+                # 读取第一个文件进行分析
+                with open(parsed_args.files[0], 'rb') as f:
+                    pdf_bytes = f.read()
+                
+                # 检查是否为推理模式
+                is_reasoning = getattr(parsed_args, 'reasoning', False) or (
+                    hasattr(parsed_args, 'service') and 
+                    any(reasoning_service in parsed_args.service.lower() 
+                        for reasoning_service in ['r1', 'reasoning', 'think', 'o1'])
+                )
+                
+                stats_obj = perform_pre_analysis(
+                    pdf_bytes=pdf_bytes,
+                    model=ModelInstance.value,
+                    pages=parsed_args.pages,
+                    is_reasoning=is_reasoning,
+                    cancellation_event=None
+                )
+                stats_obj.set_input_files(parsed_args.files)
+            
+            # 执行翻译
+            if needs_statistics:
+                translation_result = translate(model=ModelInstance.value, stats_obj=stats_obj, **vars(parsed_args))
+                # 处理翻译结果
+                if isinstance(translation_result, tuple) and len(translation_result) >= 4:
+                    result_files, token_stats, paragraph_stats, table_stats = translation_result[:4]
+                    # 收集运行时统计
+                    stats_obj = collect_runtime_stats(stats_obj, token_stats, paragraph_stats, table_stats)
+            else:
+                # 标准调用，不需要统计
+                translate(model=ModelInstance.value, **vars(parsed_args))
+
+    except Exception as e:
+        logger.error(f"执行过程中发生错误: {e}")
+        result = 1
+    finally:
+        # 结束运行时统计跟踪
+        if stats_obj:
+            stats_obj.end_runtime_tracking()
+            
+            # 生成统计报告
+            try:
+                output_dir = getattr(parsed_args, 'output', '.')
+                log_file = stats_obj.generate_report_log(output_dir)
+                logger.info(f"详细统计报告已保存到: {log_file}")
+            except Exception as e:
+                logger.error(f"生成统计报告时发生错误: {e}")
 
     return result
 
 
-def yadt_main(parsed_args) -> int:
-    if parsed_args.dir:
-        untranlate_file = find_all_files_in_directory(parsed_args.files[0])
-    else:
-        untranlate_file = parsed_args.files
-    lang_in = parsed_args.lang_in
-    lang_out = parsed_args.lang_out
-    ignore_cache = parsed_args.ignore_cache
-    outputdir = None
-    if parsed_args.output:
-        outputdir = parsed_args.output
-
-    # yadt require init before translate
+def yadt_main(parsed_args):
+    """BabelDoc translation main function"""
+    # 初始化babeldoc
     yadt_init()
-    font_path = download_remote_fonts(lang_out.lower())
-
+    from babeldoc.high_level import async_translate as babeldoc_translate
+    
+    # 解析服务参数
     param = parsed_args.service.split(":", 1)
     service_name = param[0]
     service_model = param[1] if len(param) > 1 else None
-
-    envs = {}
-    prompt = []
-
+    
+    # 设置环境变量
+    envs = getattr(parsed_args, 'envs', {}) or {}
+    
+    # 处理自定义prompt
+    prompt = None
     if parsed_args.prompt:
         try:
             with open(parsed_args.prompt, "r", encoding="utf-8") as file:
@@ -656,7 +533,8 @@ def yadt_main(parsed_args) -> int:
             prompt = Template(content)
         except Exception:
             raise ValueError("prompt error.")
-
+    
+    # 导入所有翻译器
     from pdf2zh.translator import (
         AzureOpenAITranslator,
         GoogleTranslator,
@@ -681,8 +559,10 @@ def yadt_main(parsed_args) -> int:
         OpenAIlikedTranslator,
         QwenMtTranslator,
     )
-
-    for translator in [
+    
+    # 查找匹配的翻译器
+    translator = None
+    for translator_class in [
         GoogleTranslator,
         BingTranslator,
         DeepLTranslator,
@@ -706,20 +586,35 @@ def yadt_main(parsed_args) -> int:
         OpenAIlikedTranslator,
         QwenMtTranslator,
     ]:
-        if service_name == translator.name:
-            translator = translator(
-                lang_in,
-                lang_out,
+        if service_name == translator_class.name:
+            translator = translator_class(
+                parsed_args.lang_in,
+                parsed_args.lang_out,
                 service_model,
                 envs=envs,
                 prompt=prompt,
-                ignore_cache=ignore_cache,
+                ignore_cache=getattr(parsed_args, 'ignore_cache', False),
             )
             break
-    else:
+    
+    if not translator:
         raise ValueError("Unsupported translation service")
+    
+    # 获取字体路径
+    from pdf2zh.high_level import download_remote_fonts
+    font_path = download_remote_fonts(parsed_args.lang_out.lower())
+    
+    # 处理文件列表
+    untranlate_file = parsed_args.files
+    if parsed_args.dir:
+        untranlate_file = find_all_files_in_directory(parsed_args.files[0])
+    
+    # 设置输出目录
+    outputdir = parsed_args.output or "."
+    
+    # 开始翻译
     import asyncio
-
+    
     for file in untranlate_file:
         file = file.strip("\"'")
         yadt_config = YadtConfig(
@@ -730,32 +625,54 @@ def yadt_main(parsed_args) -> int:
             doc_layout_model=None,
             translator=translator,
             debug=parsed_args.debug,
-            lang_in=lang_in,
-            lang_out=lang_out,
+            lang_in=parsed_args.lang_in,
+            lang_out=parsed_args.lang_out,
             no_dual=False,
             no_mono=False,
             qps=parsed_args.thread,
         )
-
+        
+        # 使用正确的babeldoc翻译方式
         async def yadt_translate_coro(yadt_config):
-            progress_context, progress_handler = create_progress_handler(yadt_config)
-            # 开始翻译
-            with progress_context:
-                async for event in yadt_translate(yadt_config):
-                    progress_handler(event)
-                    if yadt_config.debug:
-                        logger.debug(event)
-                    if event["type"] == "finish":
-                        result = event["translate_result"]
-                        logger.info("Translation Result:")
-                        logger.info(f"  Original PDF: {result.original_pdf_path}")
-                        logger.info(f"  Time Cost: {result.total_seconds:.2f}s")
-                        logger.info(f"  Mono PDF: {result.mono_pdf_path or 'None'}")
-                        logger.info(f"  Dual PDF: {result.dual_pdf_path or 'None'}")
-                        break
-
-        asyncio.run(yadt_translate_coro(yadt_config))
+            async for event in babeldoc_translate(yadt_config):
+                if yadt_config.debug:
+                    logger.debug(event)
+                if event["type"] == "finish":
+                    result = event["translate_result"]
+                    logger.info("Translation Result:")
+                    logger.info(f"  Original PDF: {result.original_pdf_path}")
+                    logger.info(f"  Time Cost: {result.total_seconds:.2f}s")
+                    logger.info(f"  Mono PDF: {result.mono_pdf_path or 'None'}")
+                    logger.info(f"  Dual PDF: {result.dual_pdf_path or 'None'}")
+                    return result
+        
+        result = asyncio.run(yadt_translate_coro(yadt_config))
+        logger.info(f"BabelDoc translation completed: {result}")
+    
     return 0
+
+
+def read_inputs(files: List[str]) -> List[bytes]:
+    """Read input files and return their contents as bytes"""
+    file_contents = []
+    for file in files:
+        if file.startswith(("http://", "https://")):
+            # 处理在线文件
+            import requests
+            try:
+                r = requests.get(file, allow_redirects=True)
+                if r.status_code == 200:
+                    file_contents.append(r.content)
+                else:
+                    r.raise_for_status()
+            except Exception as e:
+                logger.error(f"下载文件失败 {file}: {e}")
+                raise
+        else:
+            # 处理本地文件
+            with open(file, 'rb') as f:
+                file_contents.append(f.read())
+    return file_contents
 
 
 if __name__ == "__main__":
