@@ -30,9 +30,9 @@ from pdf2zh.statistics import perform_pre_analysis, collect_runtime_stats, PDFTr
 # ==================================================
 # A constant to represent the approximate number of tokens in the prompt template.
 # This value is used for time estimation.
-from pdf2zh.translator import TEMPLATE_PROMPT_TOKEN_COUNT
-TPS = 60 # general model token per second
-AVG_THINK_CONTENT = 450 # thinking model token per second
+# from pdf2zh.translator import TEMPLATE_PROMPT_TOKEN_COUNT
+# TPS = 60 # general model token per second
+# AVG_THINK_CONTENT = 450 # thinking model token per second
 # ==================================================
 
 logger = logging.getLogger(__name__)
@@ -405,6 +405,8 @@ def main(args: Optional[List[str]] = None) -> int:
                 if i == 0:
                     stats_obj = current_stats
                     stats_obj.set_input_files(parsed_args.files)
+                    # 确保开始运行时跟踪
+                    stats_obj.start_runtime_tracking()
                 else:
                     # 合并多个文件的统计信息
                     # 这里简化处理，实际可以考虑更复杂的合并逻辑
@@ -441,6 +443,8 @@ def main(args: Optional[List[str]] = None) -> int:
                     cancellation_event=None
                 )
                 stats_obj.set_input_files(parsed_args.files)
+                # 确保开始运行时跟踪
+                stats_obj.start_runtime_tracking()
             
             # 执行翻译
             if needs_statistics:
@@ -478,6 +482,8 @@ def main(args: Optional[List[str]] = None) -> int:
                     cancellation_event=None
                 )
                 stats_obj.set_input_files(parsed_args.files)
+                # 确保开始运行时跟踪
+                stats_obj.start_runtime_tracking()
             
             # 执行翻译
             if needs_statistics:
