@@ -175,3 +175,6 @@ uv.lock
 
 # pdf files
 ./files/*
+*.log
+nohup.out.0625
+batch.py

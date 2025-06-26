@@ -439,6 +439,31 @@ class TranslateConverter(PDFConverterEx):
         if not self.translator:
             raise ValueError("Unsupported translation service")
 
+        # 添加段落统计信息
+        self.paragraph_stats = {
+            "total_paragraphs": 0,  # 总段落数
+            "skipped_empty": 0,     # 跳过的空白段落数
+            "skipped_formula": 0,   # 跳过的公式段落数
+            "skipped_no_text": 0,   # 跳过的无中英文段落数
+            "translated": 0,         # 实际翻译的段落数
+        }
+        
+        # 添加表格单元格统计信息
+        self.table_stats = {
+            "total_cells": 0,       # 总单元格数
+            "skipped_empty": 0,     # 跳过的空白单元格数
+            "skipped_no_text": 0,   # 跳过的无中英文单元格数
+            "translated": 0,         # 实际翻译的单元格数
+        }
+
+    def get_paragraph_stats(self) -> dict:
+        """获取段落统计信息"""
+        return self.paragraph_stats.copy()
+        
+    def get_table_stats(self) -> dict:
+        """获取表格统计信息"""
+        return self.table_stats.copy()
+
     def receive_layout(self, ltpage: LTPage):
         # 段落
         sstk: list[str] = []            # 段落文字栈
@@ -490,14 +515,23 @@ class TranslateConverter(PDFConverterEx):
                 if cells:
                     # 翻译表格单元格内容
                     log.debug(f"开始翻译表格 {table_id} 的 {len(cells)} 个单元格")
+                    # 更新总单元格数统计
+                    self.table_stats["total_cells"] += len(cells)
+                    
                     for cell_idx, cell in enumerate(cells):
                         cell_text = cell.text.strip()
-                        if cell_text and re.search(r'[\u4e00-\u9fff]|[a-zA-Z]', cell_text):
+                        if not cell_text:
+                            self.table_stats["skipped_empty"] += 1
+                            cell.translated_text = cell_text
+                            continue
+                            
+                        if re.search(r'[\u4e00-\u9fff]|[a-zA-Z]', cell_text):
                             # 只翻译包含中文或英文字母的单元格
                             try:
                                 log.debug(f"[表格翻译] 单元格 {cell_idx+1}/{len(cells)} 输入: '{cell_text}'")
                                 translated_text = self.translator.translate(cell_text)
                                 cell.translated_text = translated_text
+                                self.table_stats["translated"] += 1
                                 log.debug(f"[表格翻译] 单元格 {cell_idx+1}/{len(cells)} 输出: '{translated_text}'")
                                 log.debug(f"Table cell translation: '{cell_text}' -> '{translated_text}'")
                             except Exception as e:
@@ -505,6 +539,7 @@ class TranslateConverter(PDFConverterEx):
                                 cell.translated_text = cell_text
                         else:
                             cell.translated_text = cell_text
+                            self.table_stats["skipped_no_text"] += 1
                             if cell_text:
                                 log.debug(f"[表格翻译] 单元格 {cell_idx+1}/{len(cells)} 跳过翻译(无中英文): '{cell_text}'")
                     
@@ -675,15 +710,26 @@ class TranslateConverter(PDFConverterEx):
 
         @retry(wait=wait_fixed(1))
         def worker(s: str):  # 多线程翻译
-            if not s.strip() or re.match(r"^\{v\d+\}$", s):  # 空白和公式不翻译
+            # 更新总段落计数
+            self.paragraph_stats["total_paragraphs"] += 1
+            
+            # 检查并统计跳过的情况
+            if not s.strip():
+                self.paragraph_stats["skipped_empty"] += 1
                 return s
-            # 只翻译包含中文或英文字母的内容
+            if re.match(r"^\{v\d+\}$", s):
+                self.paragraph_stats["skipped_formula"] += 1
+                return s
             if not re.search(r'[\u4e00-\u9fff]|[a-zA-Z]', s):
+                self.paragraph_stats["skipped_no_text"] += 1
                 return s
+                
             try:
                 log.debug(f"[段落翻译] 输入: '{s.strip()}'")
                 new = self.translator.translate(s)
                 log.debug(f"[段落翻译] 输出: '{new.strip()}'")
+                # 更新已翻译段落计数
+                self.paragraph_stats["translated"] += 1
                 return new
             except BaseException as e:
                 if log.isEnabledFor(logging.DEBUG):

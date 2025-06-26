@@ -335,14 +335,15 @@ def print_analysis_report(stats: dict, estimated_time: float, to_console: bool =
     """打印分析报告。如果 to_console 为 True，则打印到控制台，否则使用 debug 日志。"""
     output_func = print if to_console else logger.debug
 
-    if to_console:
-        title = " PDF Analysis Report "
-        separator = "=" * ((59 - len(title)) // 2)
-        header = f"{separator}{title}{separator}"
-        output_func(header)
-    else:
-        output_func("-" * 59)
-
+    # 写入标题
+    title = " PDF Translation Analysis Report "
+    separator = "=" * ((59 - len(title)) // 2)
+    header = f"{separator}{title}{separator}"
+    output_func(header)
+    
+    # 写入基本统计信息
+    output_func("\n1. Content Statistics")
+    output_func("-" * 59)
     output_func(f"Total Pages: {stats.get('page_count', 0)}")
     output_func(f"Total Paragraphs: {stats.get('total_paragraph_count', 0)}")
     output_func(f"Total Paragraph Tokens: {stats.get('total_paragraph_tokens', 0)}")
@@ -352,19 +353,19 @@ def print_analysis_report(stats: dict, estimated_time: float, to_console: bool =
     output_func(f"Total Table Cells: {stats.get('total_table_cell_count', 0)}")
     output_func(f"Total Table Tokens: {stats.get('total_table_tokens', 0)}")
     output_func(f"Total Estimated Content Tokens: {stats.get('total_paragraph_tokens', 0) + stats.get('total_table_tokens', 0)}")
+    
+    # 写入页面详细信息
+    output_func("\n2. Page Details")
     output_func("-" * 59)
-
-    if to_console:
-        output_func("Page-by-page breakdown:")
-
     for page_num, page_data in stats.get("pages", {}).items():
         paragraph_count = page_data.get("paragraph_count", 0)
+        table_count = page_data.get("table_count", 0)
         table_cell_count = page_data.get("table_cell_count", 0)
         table_token_count = page_data.get("table_token_count", 0)
         output_func(
-            f"  - Page {page_num + 1}: "
+            f"Page {page_num + 1}: "
             f"{paragraph_count} paragraphs ({page_data.get('paragraph_token_count', 0)} tokens) | "
-            f"{page_data.get('table_count', 0)} tables "
+            f"{table_count} tables "
             f"({table_cell_count} cells, {table_token_count} tokens)"
         )
 
@@ -408,6 +409,60 @@ def save_time_log(file_path: str, estimated_time: float, actual_time: float) -> 
         logger.info(f"时间分析报告已保存到: {log_filename}")
     except Exception as e:
         logger.error(f"保存时间日志时发生错误: {e}")
+
+
+def save_analysis_report(stats: dict, estimated_time: float, actual_time: float, filename: str):
+    """保存分析报告到文件。"""
+    with open(filename, 'w', encoding='utf-8') as f:
+        # 写入标题
+        title = " PDF Translation Analysis Report "
+        separator = "=" * ((59 - len(title)) // 2)
+        header = f"{separator}{title}{separator}\n"
+        f.write(header)
+        
+        # 写入基本统计信息
+        f.write("\n1. Content Statistics\n")
+        f.write("-" * 59 + "\n")
+        f.write(f"Total Pages: {stats.get('page_count', 0)}\n")
+        f.write(f"Total Paragraphs: {stats.get('total_paragraph_count', 0)}\n")
+        f.write(f"Total Paragraph Tokens: {stats.get('total_paragraph_tokens', 0)}\n")
+        f.write(
+            f"Actual Paragraph Tokens (for estimation): {stats.get('total_paragraph_count', 0) + stats.get('total_paragraph_count', 0) * TEMPLATE_PROMPT_TOKEN_COUNT}\n"
+        )
+        f.write(f"Total Table Cells: {stats.get('total_table_cell_count', 0)}\n")
+        f.write(f"Total Table Tokens: {stats.get('total_table_tokens', 0)}\n")
+        f.write(f"Total Estimated Content Tokens: {stats.get('total_paragraph_tokens', 0) + stats.get('total_table_tokens', 0)}\n")
+        
+        # 写入页面详细信息
+        f.write("\n2. Page Details\n")
+        f.write("-" * 59 + "\n")
+        for page_num, page_data in stats.get("pages", {}).items():
+            paragraph_count = page_data.get("paragraph_count", 0)
+            table_count = page_data.get("table_count", 0)
+            table_cell_count = page_data.get("table_cell_count", 0)
+            table_token_count = page_data.get("table_token_count", 0)
+            f.write(
+                f"Page {page_num + 1}: "
+                f"{paragraph_count} paragraphs ({page_data.get('paragraph_token_count', 0)} tokens) | "
+                f"{table_count} tables "
+                f"({table_cell_count} cells, {table_token_count} tokens)\n"
+            )
+            
+        # 写入时间分析
+        f.write("\n3. Time Analysis\n")
+        f.write("-" * 59 + "\n")
+        f.write(f"Estimated Processing Time: {estimated_time:.2f} seconds\n")
+        f.write(f"Actual Processing Time: {actual_time:.2f} seconds\n")
+        difference = actual_time - estimated_time
+        percentage = abs(difference) / estimated_time * 100
+        if difference > 0:
+            f.write(f"Time Difference: +{difference:.2f} seconds ({percentage:.1f}% longer than estimated)\n")
+        else:
+            f.write(f"Time Difference: {difference:.2f} seconds ({percentage:.1f}% shorter than estimated)\n")
+            
+        # 写入结尾分隔符
+        f.write("\n" + "=" * 59 + "\n")
+        f.write(f"Report generated at: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
 
 
 def main(args: Optional[List[str]] = None) -> int:
@@ -556,6 +611,18 @@ def main(args: Optional[List[str]] = None) -> int:
         logger.info(f"Total execution time: {actual_time:.2f} seconds")
     logger.info("="*59)
     
+    # 保存时间分析报告
+    if parsed_args.analysis_report:
+        try:
+            # 使用第一个文件名作为基础
+            base_filename = os.path.splitext(os.path.basename(parsed_args.files[0]))[0]
+            # 生成报告文件名：原文件名_YYYYMMDD_HHMMSS_analysis.txt
+            report_filename = f"{base_filename}_{time.strftime('%Y%m%d_%H%M%S')}_analysis.txt"
+            save_analysis_report(stats, estimated_time, actual_time, report_filename)
+            logger.info(f"分析报告已保存到: {report_filename}")
+        except Exception as e:
+            logger.error(f"保存分析报告时发生错误: {e}")
+
     return result
 
 

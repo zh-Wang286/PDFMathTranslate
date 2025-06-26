@@ -88,6 +88,14 @@ class BaseTranslator:
         self.model = model
         self.ignore_cache = ignore_cache
 
+        # Token统计信息
+        self.token_stats = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "translation_count": 0,  # 翻译调用次数
+        }
+
         self.cache = TranslationCache(
             self.name,
             {
@@ -188,6 +196,41 @@ class BaseTranslator:
         return self.get_rich_text_left_placeholder(
             id
         ) + self.get_rich_text_right_placeholder(id)
+
+    def update_token_stats(self, prompt_tokens: int = 0, completion_tokens: int = 0, total_tokens: int = 0):
+        """
+        更新token统计信息。
+
+        Args:
+            prompt_tokens: 输入token数
+            completion_tokens: 输出token数  
+            total_tokens: 总token数（如果为0则自动计算）
+        """
+        self.token_stats["prompt_tokens"] += prompt_tokens
+        self.token_stats["completion_tokens"] += completion_tokens
+        if total_tokens > 0:
+            self.token_stats["total_tokens"] += total_tokens
+        else:
+            self.token_stats["total_tokens"] = self.token_stats["prompt_tokens"] + self.token_stats["completion_tokens"]
+        self.token_stats["translation_count"] += 1
+
+    def get_token_stats(self) -> dict:
+        """
+        获取token统计信息。
+
+        Returns:
+            dict: 包含token统计信息的字典
+        """
+        return self.token_stats.copy()
+
+    def reset_token_stats(self):
+        """重置token统计信息。"""
+        self.token_stats = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "translation_count": 0,
+        }
 
 
 class GoogleTranslator(BaseTranslator):
@@ -424,6 +467,26 @@ class XinferenceTranslator(BaseTranslator):
                     messages=xf_prompt,
                 )
 
+                # 更新token统计信息（Xinference可能有usage信息）
+                if isinstance(response, dict) and "usage" in response:
+                    usage = response["usage"]
+                    self.update_token_stats(
+                        prompt_tokens=usage.get("prompt_tokens", 0),
+                        completion_tokens=usage.get("completion_tokens", 0),
+                        total_tokens=usage.get("total_tokens", 0)
+                    )
+                    logger.debug(f"[Token统计] 本次翻译使用: prompt={usage.get('prompt_tokens', 0)}, completion={usage.get('completion_tokens', 0)}, total={usage.get('total_tokens', 0)}")
+                else:
+                    # 如果没有usage信息，使用估算方法
+                    from pdf2zh.utils import count_tokens
+                    prompt_tokens = count_tokens(xf_prompt[0]["content"])
+                    completion_tokens = count_tokens(response["choices"][0]["message"]["content"])
+                    self.update_token_stats(
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens
+                    )
+                    logger.debug(f"[Token统计] 本次翻译估算使用: prompt={prompt_tokens}, completion={completion_tokens}")
+
                 response = response["choices"][0]["message"]["content"].replace(
                     "<end_of_turn>", ""
                 )
@@ -491,6 +554,16 @@ class OpenAITranslator(BaseTranslator):
         if not response.choices:
             if hasattr(response, "error"):
                 raise ValueError("Error response from Service", response.error)
+        
+        # 更新token统计信息
+        if hasattr(response, 'usage') and response.usage:
+            self.update_token_stats(
+                prompt_tokens=response.usage.prompt_tokens or 0,
+                completion_tokens=response.usage.completion_tokens or 0,
+                total_tokens=response.usage.total_tokens or 0
+            )
+            logger.debug(f"[Token统计] 本次翻译使用: prompt={response.usage.prompt_tokens}, completion={response.usage.completion_tokens}, total={response.usage.total_tokens}")
+        
         content = response.choices[0].message.content.strip()
         content = self.think_filter_regex.sub("", content).strip()
         return content

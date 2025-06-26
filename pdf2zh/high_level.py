@@ -189,7 +189,7 @@ def translate_patch(
     prompt: Template = None,
     ignore_cache: bool = False,
     **kwarg: Any,
-) -> None:
+) -> dict:
     rsrcmgr = PDFResourceManager()
     layout = {}
     device = TranslateConverter(
@@ -297,7 +297,26 @@ def translate_patch(
             interpreter.process_page(page)
 
     device.close()
-    return obj_patch
+    
+    # 收集token统计信息
+    token_stats = {}
+    if hasattr(device, 'translator') and device.translator:
+        token_stats = device.translator.get_token_stats()
+        logger.debug(f"[翻译完成] Token统计: {token_stats}")
+    
+    # 收集段落统计信息
+    paragraph_stats = {}
+    if hasattr(device, 'get_paragraph_stats'):
+        paragraph_stats = device.get_paragraph_stats()
+        logger.debug(f"[翻译完成] 段落统计: {paragraph_stats}")
+    
+    # 收集表格统计信息
+    table_stats = {}
+    if hasattr(device, 'get_table_stats'):
+        table_stats = device.get_table_stats()
+        logger.debug(f"[翻译完成] 表格统计: {table_stats}")
+    
+    return obj_patch, token_stats, paragraph_stats, table_stats
 
 
 def translate_stream(
@@ -363,7 +382,7 @@ def translate_stream(
     fp = io.BytesIO()
 
     doc_zh.save(fp)
-    obj_patch: dict = translate_patch(fp, **locals())
+    obj_patch, token_stats, paragraph_stats, table_stats = translate_patch(fp, **locals())
 
     for obj_id, ops_new in obj_patch.items():
         # ops_old=doc_en.xref_stream(obj_id)
@@ -381,6 +400,9 @@ def translate_stream(
     return (
         doc_zh.write(deflate=True, garbage=3, use_objstms=1),
         doc_en.write(deflate=True, garbage=3, use_objstms=1),
+        token_stats,
+        paragraph_stats,
+        table_stats,
     )
 
 
@@ -466,8 +488,33 @@ def translate(
             print(f"  {file}", file=sys.stderr)
         raise PDFValueError("Some files do not exist.")
 
-    result_files = []
+    # 初始化统计信息
+    total_token_stats = {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "translation_count": 0,
+    }
+    
+    # 添加总段落统计
+    total_paragraph_stats = {
+        "total_paragraphs": 0,
+        "skipped_empty": 0,
+        "skipped_formula": 0,
+        "skipped_no_text": 0,
+        "translated": 0,
+    }
+    
+    # 添加总表格统计
+    total_table_stats = {
+        "total_cells": 0,
+        "skipped_empty": 0,
+        "skipped_no_text": 0,
+        "translated": 0,
+    }
 
+    result_files = []
+    
     for file in files:
         if type(file) is str and (
             file.startswith("http://") or file.startswith("https://")
@@ -516,10 +563,24 @@ def translate(
         except Exception as e:
             logger.warning(f"Failed to clean temp file {file_path}", exc_info=True)
 
-        s_mono, s_dual = translate_stream(
+        result = translate_stream(
             s_raw,
             **locals(),
         )
+        s_mono, s_dual, token_stats, paragraph_stats, table_stats = result
+        
+        # 累计token统计信息
+        for key in total_token_stats:
+            total_token_stats[key] += token_stats.get(key, 0)
+            
+        # 累计段落统计信息
+        for key in total_paragraph_stats:
+            total_paragraph_stats[key] += paragraph_stats.get(key, 0)
+            
+        # 累计表格统计信息
+        for key in total_table_stats:
+            total_table_stats[key] += table_stats.get(key, 0)
+        
         file_mono = Path(output) / f"{filename}-mono.pdf"
         file_dual = Path(output) / f"{filename}-dual.pdf"
         doc_mono = open(file_mono, "wb")
@@ -533,6 +594,38 @@ def translate(
     end_time = time.time()  # 记录结束时间
     total_time = end_time - start_time
     logger.info(f"总翻译时间: {total_time:.2f} 秒")  # 记录总运行时间
+    
+    # 输出token统计报告
+    if total_token_stats["translation_count"] > 0:
+        logger.info("=" * 20 + " Translation Token Report " + "=" * 20)
+        logger.info(f"总翻译调用次数: {total_token_stats['translation_count']}")
+        logger.info(f"总输入Token数: {total_token_stats['prompt_tokens']}")
+        logger.info(f"总输出Token数: {total_token_stats['completion_tokens']}")
+        logger.info(f"总Token使用量: {total_token_stats['total_tokens']}")
+        if total_token_stats['translation_count'] > 0:
+            logger.info(f"平均每次翻译Token数: {total_token_stats['total_tokens'] / total_token_stats['translation_count']:.1f}")
+        logger.info("=" * 67)
+    
+    # 输出段落统计报告
+    if total_paragraph_stats["total_paragraphs"] > 0:
+        logger.info("=" * 20 + " Paragraph Statistics Report " + "=" * 20)
+        logger.info(f"总段落数: {total_paragraph_stats['total_paragraphs']}")
+        logger.info(f"已翻译段落: {total_paragraph_stats['translated']}")
+        logger.info(f"跳过的段落:")
+        logger.info(f"  - 空白段落: {total_paragraph_stats['skipped_empty']}")
+        logger.info(f"  - 公式段落: {total_paragraph_stats['skipped_formula']}")
+        logger.info(f"  - 无中英文段落: {total_paragraph_stats['skipped_no_text']}")
+        logger.info("=" * 67)
+        
+    # 输出表格统计报告
+    if total_table_stats["total_cells"] > 0:
+        logger.info("=" * 20 + " Table Statistics Report " + "=" * 20)
+        logger.info(f"总单元格数: {total_table_stats['total_cells']}")
+        logger.info(f"已翻译单元格: {total_table_stats['translated']}")
+        logger.info(f"跳过的单元格:")
+        logger.info(f"  - 空白单元格: {total_table_stats['skipped_empty']}")
+        logger.info(f"  - 无中英文单元格: {total_table_stats['skipped_no_text']}")
+        logger.info("=" * 67)
     
     return result_files
 
