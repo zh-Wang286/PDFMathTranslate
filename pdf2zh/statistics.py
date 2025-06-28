@@ -55,6 +55,9 @@ class PDFTranslationStatistics:
             "translation_end_time": 0,
             "total_time_seconds": 0,
             "translation_time_seconds": 0,
+            # 运行环境信息
+            "service": "",  # 使用的翻译服务
+            "thread_count": 0,  # 线程数
             # LLM调用统计
             "llm_call_count": 0,
             "actual_input_tokens": 0,
@@ -299,22 +302,34 @@ class PDFTranslationStatistics:
         Returns:
             生成的日志文件路径
         """
+        # 确保输出目录存在
+        os.makedirs(output_dir, exist_ok=True)
+        logger.debug(f"准备在目录 {output_dir} 生成统计报告...")
+
         # 生成文件名
         if self.input_files:
             base_filename = os.path.splitext(os.path.basename(self.input_files[0]))[0]
+            logger.debug(f"使用输入文件名作为基础: {base_filename}")
         else:
             base_filename = "pdf_translation"
+            logger.debug("使用默认基础文件名: pdf_translation")
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         log_filename = f"{base_filename}_{timestamp}_statistics.log"
         log_filepath = os.path.join(output_dir, log_filename)
+        
+        logger.debug(f"开始生成统计报告: {log_filepath}")
 
-        # 写入报告
-        with open(log_filepath, 'w', encoding='utf-8') as f:
-            self._write_report_content(f)
-
-        logger.info(f"统计报告已保存到: {log_filepath}")
-        return log_filepath
+        try:
+            # 写入报告
+            with open(log_filepath, 'w', encoding='utf-8') as f:
+                self._write_report_content(f)
+            
+            logger.debug(f"✓ 统计报告已成功保存到: {log_filepath}")
+            return log_filepath
+        except Exception as e:
+            logger.error(f"❌ 生成统计报告时发生错误: {e}")
+            raise
 
     def _write_report_content(self, file_handle):
         """写入报告内容到文件句柄"""
@@ -330,7 +345,16 @@ class PDFTranslationStatistics:
         if self.input_files:
             file_handle.write(f"输入文件: {', '.join(self.input_files)}\n")
         file_handle.write(f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        file_handle.write(f"推理模式: {'是' if self.is_reasoning_mode else '否'}\n\n")
+        file_handle.write(f"推理模式: {'是' if self.is_reasoning_mode else '否'}\n")
+        
+        # 写入运行环境信息
+        if self.runtime_stats["service"]:
+            file_handle.write("\n运行环境:\n")
+            file_handle.write(f"  翻译服务: {self.runtime_stats['service']}\n")
+            if self.runtime_stats["service_model"]:
+                file_handle.write(f"  使用模型: {self.runtime_stats['service_model']}\n")
+            file_handle.write(f"  线程数量: {self.runtime_stats['thread_count']}\n")
+        file_handle.write("\n")
 
         # 写入内容统计
         file_handle.write("2. 内容统计\n")
@@ -432,6 +456,26 @@ class PDFTranslationStatistics:
         # 写入结尾
         file_handle.write("=" * 80 + "\n")
         file_handle.write("报告结束\n")
+
+    def set_runtime_config(self, service: str, thread_count: int):
+        """
+        设置运行时配置信息
+
+        Args:
+            service: 使用的翻译服务（可能包含模型信息，如 'xinference:qwen3'）
+            thread_count: 使用的线程数
+        """
+        # 解析服务和模型信息
+        service_parts = service.split(":", 1)
+        service_name = service_parts[0]
+        service_model = service_parts[1] if len(service_parts) > 1 else ""
+
+        self.runtime_stats.update({
+            "service": service_name,
+            "service_model": service_model,
+            "thread_count": thread_count
+        })
+        logger.debug(f"Runtime config set: service={service_name}, model={service_model}, threads={thread_count}")
 
 
 def perform_pre_analysis(

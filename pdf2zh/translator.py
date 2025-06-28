@@ -6,7 +6,7 @@ import re
 import unicodedata
 from copy import copy
 from string import Template
-from typing import cast
+from typing import cast, Optional
 import deepl
 import ollama
 import openai
@@ -232,6 +232,29 @@ class BaseTranslator:
             "translation_count": 0,
         }
 
+    def get_service_info(self) -> dict:
+        """获取翻译服务的配置信息
+        
+        Returns:
+            dict: 包含服务配置的字典，包括：
+                - name: 服务名称
+                - model: 使用的模型
+                - lang_in: 源语言
+                - lang_out: 目标语言
+                - envs: 环境配置
+                - cache_enabled: 是否启用缓存
+                - token_stats: Token使用统计
+        """
+        return {
+            "name": self.name,
+            "model": self.model,
+            "lang_in": self.lang_in,
+            "lang_out": self.lang_out,
+            "envs": self.envs,
+            "cache_enabled": not self.ignore_cache,
+            "token_stats": self.token_stats
+        }
+
 
 class GoogleTranslator(BaseTranslator):
     name = "google"
@@ -433,8 +456,6 @@ class XinferenceTranslator(BaseTranslator):
         self.client = xinference_client.RESTfulClient(self.envs["XINFERENCE_HOST"])
         self.prompttext = prompt
         self.add_cache_impact_parameters("temperature", self.options["temperature"])
-
-        logger.info(f"XINFERENCE_HOST: {self.envs['XINFERENCE_HOST']}, XINFERENCE_MODEL: {self.envs['XINFERENCE_MODEL']}")
 
     @staticmethod
     def _remove_cot_content(content: str) -> str:

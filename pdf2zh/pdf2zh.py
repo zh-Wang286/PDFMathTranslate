@@ -613,6 +613,23 @@ def yadt_main(parsed_args):
     if not translator:
         raise ValueError("Unsupported translation service")
     
+    # 打印翻译服务信息
+    service_info = translator.get_service_info()
+    logger.info("==================== 翻译服务信息 ====================")
+    logger.info(f"服务名称: {service_info['name']}")
+    logger.info(f"使用模型: {service_info['model']}")
+    logger.info(f"源语言: {service_info['lang_in']} -> 目标语言: {service_info['lang_out']}")
+    logger.info(f"缓存启用: {'是' if service_info['cache_enabled'] else '否'}")
+    if 'envs' in service_info and service_info['envs']:
+        logger.info("服务配置:")
+        for key, value in service_info['envs'].items():
+            # 对于API密钥等敏感信息，只显示部分内容
+            if any(sensitive in key.lower() for sensitive in ['key', 'token', 'secret']):
+                if value and len(str(value)) > 8:
+                    value = f"{str(value)[:4]}...{str(value)[-4:]}"
+            logger.info(f"  {key}: {value}")
+    logger.info("===================================================")
+    
     # 获取字体路径
     from pdf2zh.high_level import download_remote_fonts
     font_path = download_remote_fonts(parsed_args.lang_out.lower())
@@ -734,6 +751,58 @@ def translate_file(
             "or provide a path via `custom_onnx_path`."
         )
 
+    # --- Initialize Translator ---
+    # 导入所有翻译器类
+    from pdf2zh.translator import (
+        AzureOpenAITranslator, GoogleTranslator, BingTranslator,
+        DeepLTranslator, DeepLXTranslator, OllamaTranslator,
+        OpenAITranslator, ZhipuTranslator, ModelScopeTranslator,
+        SiliconTranslator, GeminiTranslator, AzureTranslator,
+        TencentTranslator, DifyTranslator, AnythingLLMTranslator,
+        XinferenceTranslator, ArgosTranslator, GrokTranslator,
+        GroqTranslator, DeepseekTranslator, OpenAIlikedTranslator,
+        QwenMtTranslator,
+    )
+
+    # 解析服务参数
+    param = service.split(":", 1)
+    service_name = param[0]
+    service_model = param[1] if len(param) > 1 else None
+
+    # 查找匹配的翻译器
+    translator = None
+    translator_classes = [
+        GoogleTranslator, BingTranslator, DeepLTranslator,
+        DeepLXTranslator, OllamaTranslator, XinferenceTranslator,
+        AzureOpenAITranslator, OpenAITranslator, ZhipuTranslator,
+        ModelScopeTranslator, SiliconTranslator, GeminiTranslator,
+        AzureTranslator, TencentTranslator, DifyTranslator,
+        AnythingLLMTranslator, ArgosTranslator, GrokTranslator,
+        GroqTranslator, DeepseekTranslator, OpenAIlikedTranslator,
+        QwenMtTranslator,
+    ]
+
+    for translator_class in translator_classes:
+        if service_name == translator_class.name:
+            translator = translator_class(
+                lang_in, lang_out, service_model,
+                ignore_cache=ignore_cache,
+                **kwargs
+            )
+            break
+
+    if not translator:
+        raise ValueError(f"Unsupported translation service: {service_name}")
+
+    # 打印翻译服务信息
+    service_info = translator.get_service_info()
+    logger.info("==================== 翻译服务信息 ====================")
+    logger.info(f"服务名称: {service_info['name']}")
+    logger.info(f"使用模型: {service_info['model']}")
+    logger.info(f"源语言: {service_info['lang_in']} -> 目标语言: {service_info['lang_out']}")
+    logger.info(f"缓存启用: {'是' if service_info['cache_enabled'] else '否'}")
+    logger.info("===================================================")
+
     # --- Path and Argument Handling ---
     if input_file.startswith(("http://", "https://")):
         if not output_dir:
@@ -776,6 +845,8 @@ def translate_file(
         # Now start the overall timer and set file names on this object
         stats_obj.start_runtime_tracking()
         stats_obj.set_input_files([input_file])
+        # Set runtime configuration
+        stats_obj.set_runtime_config(service=service, thread_count=thread)
 
     # --- Main Logic: Translation ---
     translated_file_path = None

@@ -477,6 +477,7 @@ def translate(
     skip_subset_fonts: bool = False,
     ignore_cache: bool = False,
     stats_obj: Optional[Any] = None,  # 添加统计对象参数
+    use_concurrent_table_translation: bool = False,  # 单元格并发翻译
     **kwarg: Any,
 ):
     if not files:

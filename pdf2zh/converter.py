@@ -966,7 +966,8 @@ class TranslateConverter(PDFConverterEx):
 
         ############################################################
         # D. 表格排版（支持并发翻译优化结果）
-        logger.info(f"开始排版 {len(table_regions)} 个表格区域")
+        translation_mode = "并发" if self.use_concurrent_table_translation else "串行"
+        logger.info(f"开始排版 {len(table_regions)} 个表格区域 ({translation_mode}模式)")
         for table_id, table_region in table_regions.items():
             logger.info(f"排版表格 {table_id}，包含 {len(table_region.cells)} 个单元格")
             for cell_idx, cell in enumerate(table_region.cells):
@@ -1008,14 +1009,14 @@ class TranslateConverter(PDFConverterEx):
                     logger.debug(f"Table cell rendered: '{text}' at ({cell_x:.1f}, {cell_y:.1f}) size {cell_size:.1f}")
         
         if len(table_regions) > 0:
-            logger.info(f"完成 {len(table_regions)} 个表格的排版，已应用并发翻译优化结果")
+            logger.info(f"完成 {len(table_regions)} 个表格的排版 ({translation_mode}模式)")
 
         ops = f"BT {''.join(ops_list)}ET "
         return ops
 
     def _translate_table_serially(self, table_region, table_id, cells, table_regions):
         """原始的串行表格翻译逻辑"""
-        logger.debug(f"开始串行翻译表格 {table_id} 的 {len(cells)} 个单元格")
+        logger.info(f"开始串行翻译表格 {table_id} 的 {len(cells)} 个单元格")
         self.table_stats["total_cells"] += len(cells)
         
         for cell_idx, cell in enumerate(cells):
@@ -1038,7 +1039,7 @@ class TranslateConverter(PDFConverterEx):
                 self.table_stats["skipped_no_text"] += 1
         
         table_regions[table_id] = table_region
-        logger.info(f"完成表格 {table_id} 的串行翻译，共处理 {len(cells)} 个单元格")
+        logger.info(f"表格 {table_id} 的串行翻译完成，共处理 {len(cells)} 个单元格")
 
 
 class OpType(Enum):
