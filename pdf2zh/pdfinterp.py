@@ -38,7 +38,7 @@ from pdfminer.utils import (
     apply_matrix_pt,
 )
 
-log = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 
 def safe_float(o: Any) -> Optional[float]:

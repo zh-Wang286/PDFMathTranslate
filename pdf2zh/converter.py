@@ -44,7 +44,7 @@ from pdf2zh.translator import (
 
 from pdf2zh.utils import count_tokens
 
-log = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 
 class PDFConverterEx(PDFConverter):
@@ -172,10 +172,10 @@ class TableRegion:
                 self.y0 <= char.y0 <= self.y1):
                 table_chars.append(char)
         
-        log.debug(f"[表格结构] 表格 {self.table_id} 区域内发现 {len(table_chars)} 个字符")
+        logger.debug(f"[表格结构] 表格 {self.table_id} 区域内发现 {len(table_chars)} 个字符")
         
         if not table_chars:
-            log.warning(f"[表格结构] 表格 {self.table_id} 区域内未发现字符")
+            logger.warning(f"[表格结构] 表格 {self.table_id} 区域内未发现字符")
             return []
             
         # 收集表格区域内的线条
@@ -187,7 +187,7 @@ class TableRegion:
                 self.x0 <= line_x1 <= self.x1 and self.y0 <= line_y1 <= self.y1):
                 table_lines.append(line)
         
-        log.debug(f"[表格结构] 表格 {self.table_id} 区域内发现 {len(table_lines)} 条线条")
+        logger.debug(f"[表格结构] 表格 {self.table_id} 区域内发现 {len(table_lines)} 条线条")
         
         # 按Y坐标对字符进行分组（识别行）
         rows = {}
@@ -197,7 +197,7 @@ class TableRegion:
                 rows[y_key] = []
             rows[y_key].append(char)
         
-        log.debug(f"[表格结构] 表格 {self.table_id} 识别出 {len(rows)} 行")
+        logger.debug(f"[表格结构] 表格 {self.table_id} 识别出 {len(rows)} 行")
         
         # 按行处理，进一步按X坐标分组（识别列）
         cells = []
@@ -252,9 +252,9 @@ class TableRegion:
                     row_cells.append(cell_text.strip())
             
             if row_cells:
-                log.debug(f"[表格结构] 第 {row_idx+1} 行包含 {len(row_cells)} 个单元格: {row_cells}")
+                logger.debug(f"[表格结构] 第 {row_idx+1} 行包含 {len(row_cells)} 个单元格: {row_cells}")
         
-        log.debug(f"[表格结构] 表格 {self.table_id} 提取完成，共 {len(cells)} 个单元格")
+        logger.debug(f"[表格结构] 表格 {self.table_id} 提取完成，共 {len(cells)} 个单元格")
         self.cells = cells
         return cells
 
@@ -514,7 +514,7 @@ class TranslateConverter(PDFConverterEx):
                 
                 if cells:
                     # 翻译表格单元格内容
-                    log.debug(f"开始翻译表格 {table_id} 的 {len(cells)} 个单元格")
+                    logger.debug(f"开始翻译表格 {table_id} 的 {len(cells)} 个单元格")
                     # 更新总单元格数统计
                     self.table_stats["total_cells"] += len(cells)
                     
@@ -528,23 +528,23 @@ class TranslateConverter(PDFConverterEx):
                         if re.search(r'[\u4e00-\u9fff]|[a-zA-Z]', cell_text):
                             # 只翻译包含中文或英文字母的单元格
                             try:
-                                log.debug(f"[表格翻译] 单元格 {cell_idx+1}/{len(cells)} 输入: '{cell_text}'")
+                                logger.debug(f"[表格翻译] 单元格 {cell_idx+1}/{len(cells)} 输入: '{cell_text}'")
                                 translated_text = self.translator.translate(cell_text)
                                 cell.translated_text = translated_text
                                 self.table_stats["translated"] += 1
-                                log.debug(f"[表格翻译] 单元格 {cell_idx+1}/{len(cells)} 输出: '{translated_text}'")
-                                log.debug(f"Table cell translation: '{cell_text}' -> '{translated_text}'")
+                                logger.debug(f"[表格翻译] 单元格 {cell_idx+1}/{len(cells)} 输出: '{translated_text}'")
+                                logger.debug(f"Table cell translation: '{cell_text}' -> '{translated_text}'")
                             except Exception as e:
-                                log.warning(f"Failed to translate table cell '{cell_text}': {e}")
+                                logger.warning(f"Failed to translate table cell '{cell_text}': {e}")
                                 cell.translated_text = cell_text
                         else:
                             cell.translated_text = cell_text
                             self.table_stats["skipped_no_text"] += 1
                             if cell_text:
-                                log.debug(f"[表格翻译] 单元格 {cell_idx+1}/{len(cells)} 跳过翻译(无中英文): '{cell_text}'")
+                                logger.debug(f"[表格翻译] 单元格 {cell_idx+1}/{len(cells)} 跳过翻译(无中英文): '{cell_text}'")
                     
                     table_regions[table_id] = table_region
-                    log.info(f"完成表格 {table_id} 的翻译，共处理 {len(cells)} 个单元格")
+                    logger.info(f"完成表格 {table_id} 的翻译，共处理 {len(cells)} 个单元格")
 
         def vflag(font: str, char: str):    # 匹配公式（和角标）字体
             if isinstance(font, bytes):     # 不一定能 decode，直接转 str
@@ -698,15 +698,15 @@ class TranslateConverter(PDFConverterEx):
             var.append(vstk)
             varl.append(vlstk)
             varf.append(vfix)
-        log.debug("\n==========[VSTACK]==========\n")
+        logger.debug("\n==========[VSTACK]==========\n")
         for id, v in enumerate(var):  # 计算公式宽度
             l = max([vch.x1 for vch in v]) - v[0].x0
-            log.debug(f'< {l:.1f} {v[0].x0:.1f} {v[0].y0:.1f} {v[0].cid} {v[0].fontname} {len(varl[id])} > v{id} = {"".join([ch.get_text() for ch in v])}')
+            logger.debug(f'< {l:.1f} {v[0].x0:.1f} {v[0].y0:.1f} {v[0].cid} {v[0].fontname} {len(varl[id])} > v{id} = {"".join([ch.get_text() for ch in v])}')
             vlen.append(l)
 
         ############################################################
         # B. 段落翻译
-        log.debug("\n==========[SSTACK]==========\n")
+        logger.debug("\n==========[SSTACK]==========\n")
 
         @retry(wait=wait_fixed(1))
         def worker(s: str):  # 多线程翻译
@@ -725,25 +725,25 @@ class TranslateConverter(PDFConverterEx):
                 return s
                 
             try:
-                log.debug(f"[段落翻译] 输入: '{s.strip()}'")
+                logger.debug(f"[段落翻译] 输入: '{s.strip()}'")
                 new = self.translator.translate(s)
-                log.debug(f"[段落翻译] 输出: '{new.strip()}'")
+                logger.debug(f"[段落翻译] 输出: '{new.strip()}'")
                 # 更新已翻译段落计数
                 self.paragraph_stats["translated"] += 1
                 return new
             except BaseException as e:
-                if log.isEnabledFor(logging.DEBUG):
-                    log.exception(e)
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.exception(e)
                 else:
-                    log.exception(e, exc_info=False)
+                    logger.exception(e, exc_info=False)
                 raise e
         
-        log.info(f"开始翻译 {len(sstk)} 个段落")
+        logger.info(f"开始翻译 {len(sstk)} 个段落")
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=self.thread
         ) as executor:
             news = list(executor.map(worker, sstk))
-        log.debug(f"完成段落翻译")
+        logger.debug(f"完成段落翻译")
 
         ############################################################
         # C. 新文档排版
@@ -784,7 +784,7 @@ class TranslateConverter(PDFConverterEx):
             tx = x
             fcur_ = fcur
             ptr = 0
-            log.debug(f"< {y} {x} {x0} {x1} {size} {brk} > {sstk[id]} | {new}")
+            logger.debug(f"< {y} {x} {x0} {x1} {size} {brk} > {sstk[id]} | {new}")
 
             ops_vals: list[dict] = []
             
@@ -914,7 +914,7 @@ class TranslateConverter(PDFConverterEx):
                             "rtxt": raw_string(self.fontid[vch.font], vc),
                             "lidx": lidx
                         })
-                        if log.isEnabledFor(logging.DEBUG):
+                        if logger.isEnabledFor(logging.DEBUG):
                             lstk.append(LTLine(0.1, (_x, _y), (x + vch.x0 - var[vid][0].x0, fix + y + vch.y0 - var[vid][0].y0)))
                             _x, _y = x + vch.x0 - var[vid][0].x0, fix + y + vch.y0 - var[vid][0].y0
                     for l in varl[vid]:  # 排版公式线条
@@ -940,7 +940,7 @@ class TranslateConverter(PDFConverterEx):
                 adv -= mod # 文字修饰符
                 fcur = fcur_
                 x += adv
-                if log.isEnabledFor(logging.DEBUG):
+                if logger.isEnabledFor(logging.DEBUG):
                     lstk.append(LTLine(0.1, (_x, _y), (x, y)))
                     _x, _y = x, y
             # 处理结尾
@@ -972,9 +972,9 @@ class TranslateConverter(PDFConverterEx):
 
         ############################################################
         # D. 表格排版
-        log.info(f"开始排版 {len(table_regions)} 个表格区域")
+        logger.info(f"开始排版 {len(table_regions)} 个表格区域")
         for table_id, table_region in table_regions.items():
-            log.info(f"排版表格 {table_id}，包含 {len(table_region.cells)} 个单元格")
+            logger.info(f"排版表格 {table_id}，包含 {len(table_region.cells)} 个单元格")
             for cell_idx, cell in enumerate(table_region.cells):
                 if hasattr(cell, 'translated_text') and cell.translated_text:
                     # 对每个单元格进行排版
@@ -1002,11 +1002,11 @@ class TranslateConverter(PDFConverterEx):
                     rtxt = raw_string(fcur, text)
                     ops_list.append(gen_op_txt(fcur, cell_size, cell_x, cell_y, rtxt))
                     
-                    log.debug(f"[表格排版] 单元格 {cell_idx+1}: '{text}' 位置({cell_x:.1f}, {cell_y:.1f}) 字体:{fcur} 大小:{cell_size:.1f}")
-                    log.debug(f"Table cell rendered: '{text}' at ({cell_x:.1f}, {cell_y:.1f}) size {cell_size:.1f}")
+                    logger.debug(f"[表格排版] 单元格 {cell_idx+1}: '{text}' 位置({cell_x:.1f}, {cell_y:.1f}) 字体:{fcur} 大小:{cell_size:.1f}")
+                    logger.debug(f"Table cell rendered: '{text}' at ({cell_x:.1f}, {cell_y:.1f}) size {cell_size:.1f}")
         
         if len(table_regions) > 0:
-            log.info(f"完成 {len(table_regions)} 个表格的排版")
+            logger.info(f"完成 {len(table_regions)} 个表格的排版")
 
         ops = f"BT {''.join(ops_list)}ET "
         return ops

@@ -230,6 +230,14 @@ class PDFTranslationStatistics:
         """设置输入文件列表"""
         self.input_files = files
 
+    def get_total_time(self) -> float:
+        """获取总运行时间（秒）"""
+        return self.runtime_stats.get("total_time_seconds", 0.0)
+
+    def get_estimated_total_tokens(self) -> int:
+        """获取估算的总token数"""
+        return self.pre_stats.get("estimated_total_tokens", 0)
+
     def get_estimation_summary(self) -> Dict[str, Any]:
         """获取估算数据摘要"""
         return {

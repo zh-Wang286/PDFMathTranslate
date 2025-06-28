@@ -9,23 +9,24 @@ import argparse
 import logging
 import sys
 from string import Template
-from typing import List, Optional
+from typing import List, Optional, Any
 import time
 import os
 from datetime import datetime
 
-from pdf2zh import __version__, log
-from pdf2zh.high_level import translate, download_remote_fonts
-from pdf2zh.doclayout import OnnxModel, ModelInstance
+from .doclayout import OnnxModel, ModelInstance
+from .high_level import translate, download_remote_fonts
+from .config import ConfigManager
+from .statistics import perform_pre_analysis, collect_runtime_stats, PDFTranslationStatistics
 
-from pdf2zh.config import ConfigManager
 from babeldoc.translation_config import TranslationConfig as YadtConfig
 from babeldoc.high_level import async_translate as yadt_translate
 from babeldoc.high_level import init as yadt_init
 from babeldoc.main import create_progress_handler
 
 from pdf2zh.high_level import analyze_pdf
-from pdf2zh.statistics import perform_pre_analysis, collect_runtime_stats, PDFTranslationStatistics
+
+logger = logging.getLogger(__name__)
 
 # ==================================================
 # A constant to represent the approximate number of tokens in the prompt template.
@@ -34,8 +35,6 @@ from pdf2zh.statistics import perform_pre_analysis, collect_runtime_stats, PDFTr
 # TPS = 60 # general model token per second
 # AVG_THINK_CONTENT = 450 # thinking model token per second
 # ==================================================
-
-logger = logging.getLogger(__name__)
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -298,7 +297,7 @@ def main(args: Optional[List[str]] = None) -> int:
         ConfigManager.custome_config(parsed_args.config)
 
     if parsed_args.debug:
-        log.setLevel(logging.DEBUG)
+        logger.setLevel(logging.DEBUG)
 
     if parsed_args.onnx:
         ModelInstance.value = OnnxModel(parsed_args.onnx)
@@ -656,6 +655,167 @@ def yadt_main(parsed_args):
         logger.info(f"BabelDoc translation completed: {result}")
     
     return 0
+
+
+def translate_file(
+    input_file: str,
+    output_dir: Optional[str] = None,
+    pages: Optional[list[int]] = None,
+    lang_in: str = "en",
+    lang_out: str = "zh",
+    service: str = "google",
+    thread: int = 4,
+    *,
+    vfont: str = "",
+    vchar: str = "",
+    custom_onnx_path: Optional[str] = None,
+    analysis_only: bool = False,
+    generate_analysis_report: bool = False,
+    reasoning: bool = False,
+    ignore_cache: bool = False,
+    debug: bool = False,
+    **kwargs: Any,
+) -> (Optional[str], Optional[PDFTranslationStatistics]):
+    """
+    Programmatic entry point for PDF translation and analysis.
+
+    This function encapsulates the core functionality of pdf2zh, allowing for
+    translation, analysis, and statistics generation through a library call.
+
+    Args:
+        input_file: Path to the PDF file. Can be a local path or a URL.
+        output_dir: Directory to save the translated file and reports.
+                    Defaults to the input file's directory or current dir for URLs.
+        pages: List of 0-indexed page numbers to process. None for all pages.
+        lang_in: Source language code.
+        lang_out: Target language code.
+        service: Translation service to use.
+        thread: Number of translation threads.
+        vfont: Regex for formula font names.
+        vchar: Regex for formula characters.
+        custom_onnx_path: Path to a custom ONNX model.
+        analysis_only: If True, performs only PDF analysis without translation.
+        generate_analysis_report: If True, generates a detailed statistics report.
+        reasoning: Use alternative reasoning mode for time estimation.
+        ignore_cache: Ignore cache and force re-translation.
+        debug: If True, enables debug logging level.
+        **kwargs: Additional arguments for the `translate` function.
+
+    Returns:
+        A tuple containing:
+        - The path to the translated PDF file (str) or None if translation failed or was skipped.
+        - A PDFTranslationStatistics object with the analysis and runtime data, or None if stats were not requested.
+    """
+    # --- Set up logging ---
+    if debug:
+        logger.setLevel(logging.DEBUG)
+
+    # --- Model Initialization ---
+    if custom_onnx_path:
+        model = OnnxModel(custom_onnx_path)
+    else:
+        if not hasattr(ModelInstance, "value") or not ModelInstance.value:
+            ModelInstance.value = OnnxModel.load_available()
+        model = ModelInstance.value
+
+    if not model:
+        raise RuntimeError(
+            "Layout analysis model not found. Ensure a model is available "
+            "or provide a path via `custom_onnx_path`."
+        )
+
+    # --- Path and Argument Handling ---
+    if input_file.startswith(("http://", "https://")):
+        if not output_dir:
+            output_dir = "."
+    else:
+        if not os.path.exists(input_file):
+            raise FileNotFoundError(f"Input file not found: {input_file}")
+        if not output_dir:
+            output_dir = os.path.dirname(input_file)
+    
+    os.makedirs(output_dir, exist_ok=True)
+
+    # --- Read Input File ---
+    try:
+        pdf_bytes_list = read_inputs([input_file])
+        if not pdf_bytes_list:
+            raise ValueError("Could not read input file.")
+        pdf_bytes = pdf_bytes_list[0]
+    except Exception as e:
+        logger.error(f"Failed to read input file {input_file}: {e}")
+        return None, None
+
+    # --- Determine Reasoning Mode ---
+    is_reasoning = reasoning or any(
+        s in service.lower() for s in ['r1', 'reasoning', 'think', 'o1']
+    )
+
+    # --- Statistics and Analysis ---
+    stats_obj: Optional[PDFTranslationStatistics] = None
+    needs_statistics = analysis_only or generate_analysis_report
+    if needs_statistics:
+        # Perform pre-analysis first to get an initialized stats object
+        stats_obj = perform_pre_analysis(
+            pdf_bytes=pdf_bytes,
+            model=model,
+            pages=pages,
+            is_reasoning=is_reasoning,
+            cancellation_event=None,
+        )
+        # Now start the overall timer and set file names on this object
+        stats_obj.start_runtime_tracking()
+        stats_obj.set_input_files([input_file])
+
+    # --- Main Logic: Translation ---
+    translated_file_path = None
+    try:
+        if analysis_only:
+            logger.info("Analysis only mode. Skipping translation.")
+        else:
+            # Perform translation
+            logger.info("Starting translation...")
+            translation_result = translate(
+                files=[input_file],
+                output=output_dir,
+                pages=pages,
+                lang_in=lang_in,
+                lang_out=lang_out,
+                service=service,
+                thread=thread,
+                vfont=vfont,
+                vchar=vchar,
+                model=model,
+                ignore_cache=ignore_cache,
+                stats_obj=stats_obj,
+                **kwargs,
+            )
+
+            if translation_result and translation_result[0]:
+                translated_file_path = translation_result[0][0]
+                # Collect runtime stats if needed
+                if stats_obj:
+                    _, token_stats, paragraph_stats, table_stats = translation_result[:4]
+                    stats_obj = collect_runtime_stats(stats_obj, token_stats, paragraph_stats, table_stats)
+                logger.info(f"Translation successful. Output: {translated_file_path}")
+            else:
+                logger.error("Translation failed.")
+
+    except Exception as e:
+        logger.error(f"An error occurred during processing: {e}", exc_info=True)
+        return None, stats_obj
+    finally:
+        # --- Finalize Statistics and Reporting ---
+        if stats_obj:
+            stats_obj.end_runtime_tracking()
+            if generate_analysis_report:
+                try:
+                    log_file = stats_obj.generate_report_log(output_dir)
+                    logger.info(f"Statistics report saved to: {log_file}")
+                except Exception as e:
+                    logger.error(f"Failed to generate statistics report: {e}")
+    
+    return translated_file_path, stats_obj
 
 
 def read_inputs(files: List[str]) -> List[bytes]:

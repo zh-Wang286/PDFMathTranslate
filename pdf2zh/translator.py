@@ -582,7 +582,7 @@ class AzureOpenAITranslator(BaseTranslator):
     name = "azure-openai"
     envs = {
         "AZURE_OPENAI_BASE_URL": "https://nnitasia-openai-01-ins.openai.azure.com/",  # e.g. "https://xxx.openai.azure.com"
-        "AZURE_OPENAI_API_KEY": None,
+        "AZURE_OPENAI_API_KEY": "7218515241f04d98b3b5d9869a25b91f",
         "AZURE_OPENAI_MODEL": "NNITAsia-GPT-4o",
         "AZURE_OPENAI_API_VERSION": "2024-06-01",  # default api version
     }
@@ -624,7 +624,7 @@ class AzureOpenAITranslator(BaseTranslator):
             **self.options,
             messages=self.prompt(text, self.prompttext),
         )
-        logger.info(f"pre prompttext: {self.prompt(text, self.prompttext)}")
+        logger.debug(f"pre prompttext: {self.prompt(text, self.prompttext)}")
         return response.choices[0].message.content.strip()
 
 
