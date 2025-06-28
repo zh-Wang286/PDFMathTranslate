@@ -859,6 +859,10 @@ def translate_file(
     ignore_cache: bool = False,
     debug: bool = False,
     use_concurrent_table_translation: bool = True,
+    compatible: bool = False,
+    skip_subset_fonts: bool = False,
+    prompt: Optional[str] = None,
+    babeldoc: bool = False,
     **kwargs: Any,
 ) -> (Optional[str], Optional[PDFTranslationStatistics]):
     """
@@ -885,6 +889,10 @@ def translate_file(
         ignore_cache: Ignore cache and force re-translation.
         debug: If True, enables debug logging level.
         use_concurrent_table_translation: Whether to enable concurrent translation for tables.
+        compatible: Convert the PDF file into PDF/A format to improve compatibility.
+        skip_subset_fonts: Skip font subsetting to improve compatibility at cost of file size.
+        prompt: Custom prompt template for translation.
+        babeldoc: Use experimental backend babeldoc.
         **kwargs: Additional arguments for the `translate` function.
 
     Returns:
@@ -895,6 +903,52 @@ def translate_file(
     # --- Set up logging ---
     if debug:
         logger.setLevel(logging.DEBUG)
+
+    # --- Handle Prompt Template ---
+    if prompt:
+        try:
+            with open(prompt, "r", encoding="utf-8") as file:
+                prompt = Template(file.read())
+        except Exception:
+            raise ValueError("Failed to read prompt template.")
+
+    # --- Handle Backend Selection ---
+    if babeldoc:
+        from babeldoc.high_level import init as yadt_init
+        yadt_init()
+        
+        # Create config for babeldoc
+        from babeldoc.translation_config import TranslationConfig as YadtConfig
+        yadt_config = YadtConfig(
+            input_file=input_file,
+            output_dir=output_dir,
+            pages=",".join(str(x + 1) for x in pages) if pages else None,
+            lang_in=lang_in,
+            lang_out=lang_out,
+            doc_layout_model=None,
+            debug=debug,
+            qps=thread,
+            no_dual=False,
+            no_mono=False,
+        )
+        
+        # Execute babeldoc translation
+        import asyncio
+        async def yadt_translate_coro(config):
+            from babeldoc.high_level import async_translate
+            async for event in async_translate(config):
+                if debug:
+                    logger.debug(event)
+                if event["type"] == "finish":
+                    result = event["translate_result"]
+                    return result.dual_pdf_path or result.mono_pdf_path
+        
+        try:
+            translated_file_path = asyncio.run(yadt_translate_coro(yadt_config))
+            return translated_file_path, stats_obj
+        except Exception as e:
+            logger.error(f"BabelDoc translation failed: {e}")
+            return None, stats_obj
 
     # --- Model Initialization ---
     if custom_onnx_path:
@@ -946,6 +1000,7 @@ def translate_file(
             translator = translator_class(
                 lang_in, lang_out, service_model,
                 ignore_cache=ignore_cache,
+                prompt=prompt,
                 **kwargs
             )
             break
@@ -1032,6 +1087,8 @@ def translate_file(
                 ignore_cache=ignore_cache,
                 stats_obj=stats_obj,
                 use_concurrent_table_translation=use_concurrent_table_translation,
+                compatible=compatible,
+                skip_subset_fonts=skip_subset_fonts,
                 **kwargs,
             )
 
