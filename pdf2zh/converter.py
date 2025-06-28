@@ -261,6 +261,37 @@ class TableRegion:
         return cells
 
 
+class OpType(Enum):
+    TEXT = "text"
+    LINE = "line"
+
+
+@dataclass
+class CellTranslationTask:
+    """单元格翻译任务数据结构"""
+    cell_idx: int
+    cell: 'TableCell'
+    text: str
+    row_idx: int
+    col_idx: int
+    
+
+@dataclass
+class SpatialConstraint:
+    """空间约束信息"""
+    max_width: float
+    max_height: float
+    adjacent_cells: List['TableCell']
+    
+
+@dataclass  
+class TableLayoutConfig:
+    """表格布局配置"""
+    min_font_size: float = 6.0
+    max_font_size: float = 24.0
+    font_size_step: float = 0.5
+    overlap_tolerance: float = 2.0  # 允许的重叠像素容忍度
+
 class AnalysisConverter(PDFConverterEx):
     """
     A converter for analyzing PDF layout and content without translation.
@@ -1020,38 +1051,6 @@ class TranslateConverter(PDFConverterEx):
 
         ops = f"BT {''.join(ops_list)}ET "
         return ops
-
-
-class OpType(Enum):
-    TEXT = "text"
-    LINE = "line"
-
-
-@dataclass
-class CellTranslationTask:
-    """单元格翻译任务数据结构"""
-    cell_idx: int
-    cell: 'TableCell'
-    text: str
-    row_idx: int
-    col_idx: int
-    
-
-@dataclass
-class SpatialConstraint:
-    """空间约束信息"""
-    max_width: float
-    max_height: float
-    adjacent_cells: List['TableCell']
-    
-
-@dataclass  
-class TableLayoutConfig:
-    """表格布局配置"""
-    min_font_size: float = 6.0
-    max_font_size: float = 24.0
-    font_size_step: float = 0.5
-    overlap_tolerance: float = 2.0  # 允许的重叠像素容忍度
     
 
 class SerialTableTranslator:

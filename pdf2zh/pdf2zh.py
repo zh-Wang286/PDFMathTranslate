@@ -26,6 +26,12 @@ from babeldoc.main import create_progress_handler
 
 from pdf2zh.high_level import analyze_pdf
 
+# 导入版本信息
+try:
+    from pdf2zh import __version__
+except ImportError:
+    __version__ = "unknown"
+
 logger = logging.getLogger(__name__)
 
 # ==================================================
@@ -36,6 +42,187 @@ logger = logging.getLogger(__name__)
 # AVG_THINK_CONTENT = 450 # thinking model token per second
 # ==================================================
 
+# =================== 统计功能通用接口 ===================
+
+def initialize_statistics(
+    needs_statistics: bool,
+    files: Optional[List[str]] = None,
+    service: str = "",
+    thread_count: int = 4
+) -> Optional[PDFTranslationStatistics]:
+    """
+    初始化统计功能
+    
+    Args:
+        needs_statistics: 是否需要统计功能
+        files: 输入文件列表
+        service: 翻译服务名称
+        thread_count: 线程数量
+        
+    Returns:
+        PDFTranslationStatistics对象或None
+    """
+    if not needs_statistics:
+        return None
+        
+    logger.debug("初始化统计功能...")
+    stats_obj = PDFTranslationStatistics()
+    stats_obj.start_runtime_tracking()
+    
+    if files:
+        stats_obj.set_input_files(files)
+        
+    # 设置运行时配置
+    if service or thread_count:
+        stats_obj.set_runtime_config(service=service, thread_count=thread_count)
+        
+    logger.debug("统计功能初始化完成")
+    return stats_obj
+
+
+def perform_pdf_pre_analysis(
+    stats_obj: Optional[PDFTranslationStatistics],
+    files: List[str],
+    model,
+    pages: Optional[List[int]] = None,
+    service: str = "",
+    reasoning: bool = False
+) -> Optional[PDFTranslationStatistics]:
+    """
+    执行PDF预分析
+    
+    Args:
+        stats_obj: 统计对象，如果为None则跳过分析
+        files: 输入文件列表
+        model: ONNX模型实例
+        pages: 页面列表
+        service: 翻译服务名称
+        reasoning: 是否为推理模式
+        
+    Returns:
+        更新后的统计对象或None
+    """
+    if not stats_obj or not files:
+        return stats_obj
+        
+    logger.info("执行预处理分析...")
+    
+    # 检查是否为推理模式
+    is_reasoning = reasoning or (
+        service and any(reasoning_service in service.lower() 
+                       for reasoning_service in ['r1', 'reasoning', 'think', 'o1'])
+    )
+    
+    try:
+        # 读取文件内容
+        file_contents = read_inputs(files)
+        
+        # 执行预分析（使用第一个文件）
+        for i, pdf_bytes in enumerate(file_contents):
+            logger.info(f"分析文件 {i+1}/{len(file_contents)}: {files[i]}")
+            
+            current_stats = perform_pre_analysis(
+                pdf_bytes=pdf_bytes,
+                model=model,
+                pages=pages,
+                is_reasoning=is_reasoning,
+                cancellation_event=None
+            )
+            
+            if i == 0:
+                # 使用第一个文件的分析结果
+                stats_obj = current_stats
+                stats_obj.set_input_files(files)
+                # 确保开始运行时跟踪
+                stats_obj.start_runtime_tracking()
+                # 重新设置运行时配置
+                if hasattr(stats_obj, '_service') or hasattr(stats_obj, '_thread_count'):
+                    service_val = getattr(stats_obj, '_service', service)
+                    thread_val = getattr(stats_obj, '_thread_count', 4)
+                    stats_obj.set_runtime_config(service=service_val, thread_count=thread_val)
+            else:
+                # 这里可以扩展为合并多个文件的统计信息
+                logger.debug(f"跳过文件 {i+1} 的统计合并（简化处理）")
+                
+        logger.info("PDF预分析完成")
+        return stats_obj
+        
+    except Exception as e:
+        logger.error(f"预分析过程中发生错误: {e}")
+        return stats_obj
+
+
+def collect_translation_statistics(
+    stats_obj: Optional[PDFTranslationStatistics],
+    translation_result: Any
+) -> Optional[PDFTranslationStatistics]:
+    """
+    收集翻译统计信息
+    
+    Args:
+        stats_obj: 统计对象
+        translation_result: 翻译结果
+        
+    Returns:
+        更新后的统计对象
+    """
+    if not stats_obj or not translation_result:
+        return stats_obj
+        
+    try:
+        if isinstance(translation_result, tuple) and len(translation_result) >= 4:
+            result_files, token_stats, paragraph_stats, table_stats = translation_result[:4]
+            # 收集运行时统计
+            stats_obj = collect_runtime_stats(stats_obj, token_stats, paragraph_stats, table_stats)
+            logger.debug("翻译统计信息收集完成")
+        else:
+            logger.warning("翻译结果格式不符合预期，跳过统计收集")
+    except Exception as e:
+        logger.error(f"收集翻译统计时发生错误: {e}")
+        
+    return stats_obj
+
+
+def finalize_statistics(
+    stats_obj: Optional[PDFTranslationStatistics],
+    output_dir: str = ".",
+    generate_report: bool = True
+) -> Optional[str]:
+    """
+    结束统计功能并生成报告
+    
+    Args:
+        stats_obj: 统计对象
+        output_dir: 输出目录
+        generate_report: 是否生成报告
+        
+    Returns:
+        生成的报告文件路径或None
+    """
+    if not stats_obj:
+        return None
+        
+    try:
+        # 结束运行时统计跟踪
+        stats_obj.end_runtime_tracking()
+        logger.debug("统计跟踪已结束")
+        
+        # 生成统计报告
+        if generate_report:
+            # 处理输出目录路径，移除可能的.pdf后缀
+            clean_output_dir = output_dir
+            if clean_output_dir.endswith('.pdf'):
+                clean_output_dir = os.path.splitext(clean_output_dir)[0]
+                
+            log_file = stats_obj.generate_report_log(clean_output_dir)
+            logger.info(f"详细统计报告已保存到: {log_file}")
+            return log_file
+    except Exception as e:
+        logger.error(f"结束统计功能时发生错误: {e}")
+        
+    return None
+
+# ==================================================
 
 def create_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, add_help=True)
@@ -359,9 +546,6 @@ def main(args: Optional[List[str]] = None) -> int:
 
     print(parsed_args)
 
-    # 初始化统计对象
-    stats_obj: Optional[PDFTranslationStatistics] = None
-    
     # 检查是否需要统计功能
     needs_statistics = (
         parsed_args.analysis_only or 
@@ -369,16 +553,17 @@ def main(args: Optional[List[str]] = None) -> int:
         getattr(parsed_args, 'statistics', False)  # 为未来可能的统计参数预留
     )
 
+    # 初始化统计功能
+    stats_obj = initialize_statistics(
+        needs_statistics=needs_statistics,
+        files=parsed_args.files,
+        service=getattr(parsed_args, 'service', ''),
+        thread_count=getattr(parsed_args, 'thread', 4)
+    )
+
     result = 0
 
     try:
-        # 开始运行时统计跟踪
-        if needs_statistics:
-            stats_obj = PDFTranslationStatistics()
-            stats_obj.start_runtime_tracking()
-            if parsed_args.files:
-                stats_obj.set_input_files(parsed_args.files)
-
         if parsed_args.analysis_only:
             # 仅分析模式
             if not parsed_args.files:
@@ -387,37 +572,15 @@ def main(args: Optional[List[str]] = None) -> int:
                 
             logger.info("开始PDF分析模式...")
             
-            # 读取文件内容
-            file_contents = read_inputs(parsed_args.files)
-            
             # 执行预分析
-            for i, pdf_bytes in enumerate(file_contents):
-                logger.info(f"分析文件 {i+1}/{len(file_contents)}: {parsed_args.files[i]}")
-                
-                # 检查是否为推理模式
-                is_reasoning = getattr(parsed_args, 'reasoning', False) or (
-                    hasattr(parsed_args, 'service') and 
-                    any(reasoning_service in parsed_args.service.lower() 
-                        for reasoning_service in ['r1', 'reasoning', 'think', 'o1'])
-                )
-                
-                current_stats = perform_pre_analysis(
-                    pdf_bytes=pdf_bytes,
-                    model=ModelInstance.value,
-                    pages=parsed_args.pages,
-                    is_reasoning=is_reasoning,
-                    cancellation_event=None
-                )
-                
-                if i == 0:
-                    stats_obj = current_stats
-                    stats_obj.set_input_files(parsed_args.files)
-                    # 确保开始运行时跟踪
-                    stats_obj.start_runtime_tracking()
-                else:
-                    # 合并多个文件的统计信息
-                    # 这里简化处理，实际可以考虑更复杂的合并逻辑
-                    pass
+            stats_obj = perform_pdf_pre_analysis(
+                stats_obj=stats_obj,
+                files=parsed_args.files,
+                model=ModelInstance.value,
+                pages=parsed_args.pages,
+                service=getattr(parsed_args, 'service', ''),
+                reasoning=getattr(parsed_args, 'reasoning', False)
+            )
                     
             logger.info("PDF分析完成")
             
@@ -427,79 +590,42 @@ def main(args: Optional[List[str]] = None) -> int:
             untranlate_file = find_all_files_in_directory(parsed_args.files[0])
             parsed_args.files = untranlate_file
             
-            # 如果需要统计，先执行预分析
-            if needs_statistics and parsed_args.files:
-                logger.info("执行预处理分析...")
-                
-                # 读取第一个文件进行分析（简化处理）
-                with open(parsed_args.files[0], 'rb') as f:
-                    pdf_bytes = f.read()
-                
-                # 检查是否为推理模式
-                is_reasoning = getattr(parsed_args, 'reasoning', False) or (
-                    hasattr(parsed_args, 'service') and 
-                    any(reasoning_service in parsed_args.service.lower() 
-                        for reasoning_service in ['r1', 'reasoning', 'think', 'o1'])
-                )
-                
-                stats_obj = perform_pre_analysis(
-                    pdf_bytes=pdf_bytes,
-                    model=ModelInstance.value,
-                    pages=parsed_args.pages,
-                    is_reasoning=is_reasoning,
-                    cancellation_event=None
-                )
-                stats_obj.set_input_files(parsed_args.files)
-                # 确保开始运行时跟踪
-                stats_obj.start_runtime_tracking()
+            # 执行预分析
+            stats_obj = perform_pdf_pre_analysis(
+                stats_obj=stats_obj,
+                files=parsed_args.files,
+                model=ModelInstance.value,
+                pages=parsed_args.pages,
+                service=getattr(parsed_args, 'service', ''),
+                reasoning=getattr(parsed_args, 'reasoning', False)
+            )
             
             # 执行翻译
             if needs_statistics:
                 translation_result = translate(model=ModelInstance.value, stats_obj=stats_obj, **vars(parsed_args))
-                # 处理翻译结果
-                if isinstance(translation_result, tuple) and len(translation_result) >= 4:
-                    result_files, token_stats, paragraph_stats, table_stats = translation_result[:4]
-                    # 收集运行时统计
-                    stats_obj = collect_runtime_stats(stats_obj, token_stats, paragraph_stats, table_stats)
+                # 收集翻译统计
+                stats_obj = collect_translation_statistics(stats_obj, translation_result)
             else:
                 # 标准调用，不需要统计
                 translate(model=ModelInstance.value, **vars(parsed_args))
             
         else:
             # 标准翻译模式
-            if needs_statistics and parsed_args.files:
-                logger.info("执行预处理分析...")
-                
-                # 读取第一个文件进行分析
-                with open(parsed_args.files[0], 'rb') as f:
-                    pdf_bytes = f.read()
-                
-                # 检查是否为推理模式
-                is_reasoning = getattr(parsed_args, 'reasoning', False) or (
-                    hasattr(parsed_args, 'service') and 
-                    any(reasoning_service in parsed_args.service.lower() 
-                        for reasoning_service in ['r1', 'reasoning', 'think', 'o1'])
-                )
-                
-                stats_obj = perform_pre_analysis(
-                    pdf_bytes=pdf_bytes,
-                    model=ModelInstance.value,
-                    pages=parsed_args.pages,
-                    is_reasoning=is_reasoning,
-                    cancellation_event=None
-                )
-                stats_obj.set_input_files(parsed_args.files)
-                # 确保开始运行时跟踪
-                stats_obj.start_runtime_tracking()
+            # 执行预分析
+            stats_obj = perform_pdf_pre_analysis(
+                stats_obj=stats_obj,
+                files=parsed_args.files,
+                model=ModelInstance.value,
+                pages=parsed_args.pages,
+                service=getattr(parsed_args, 'service', ''),
+                reasoning=getattr(parsed_args, 'reasoning', False)
+            )
             
             # 执行翻译
             if needs_statistics:
                 translation_result = translate(model=ModelInstance.value, stats_obj=stats_obj, **vars(parsed_args))
-                # 处理翻译结果
-                if isinstance(translation_result, tuple) and len(translation_result) >= 4:
-                    result_files, token_stats, paragraph_stats, table_stats = translation_result[:4]
-                    # 收集运行时统计
-                    stats_obj = collect_runtime_stats(stats_obj, token_stats, paragraph_stats, table_stats)
+                # 收集翻译统计
+                stats_obj = collect_translation_statistics(stats_obj, translation_result)
             else:
                 # 标准调用，不需要统计
                 translate(model=ModelInstance.value, **vars(parsed_args))
@@ -508,17 +634,12 @@ def main(args: Optional[List[str]] = None) -> int:
         logger.error(f"执行过程中发生错误: {e}")
         result = 1
     finally:
-        # 结束运行时统计跟踪
-        if stats_obj:
-            stats_obj.end_runtime_tracking()
-            
-            # 生成统计报告
-            try:
-                output_dir = getattr(parsed_args, 'output', '.')
-                log_file = stats_obj.generate_report_log(output_dir)
-                logger.info(f"详细统计报告已保存到: {log_file}")
-            except Exception as e:
-                logger.error(f"生成统计报告时发生错误: {e}")
+        # 结束统计功能并生成报告
+        finalize_statistics(
+            stats_obj=stats_obj,
+            output_dir=getattr(parsed_args, 'output', '.'),
+            generate_report=needs_statistics
+        )
 
     return result
 
@@ -529,157 +650,195 @@ def yadt_main(parsed_args):
     yadt_init()
     from babeldoc.high_level import async_translate as babeldoc_translate
     
-    # 解析服务参数
-    param = parsed_args.service.split(":", 1)
-    service_name = param[0]
-    service_model = param[1] if len(param) > 1 else None
-    
-    # 设置环境变量
-    envs = getattr(parsed_args, 'envs', {}) or {}
-    
-    # 处理自定义prompt
-    prompt = None
-    if parsed_args.prompt:
-        try:
-            with open(parsed_args.prompt, "r", encoding="utf-8") as file:
-                content = file.read()
-            prompt = Template(content)
-        except Exception:
-            raise ValueError("prompt error.")
-    
-    # 导入所有翻译器
-    from pdf2zh.translator import (
-        AzureOpenAITranslator,
-        GoogleTranslator,
-        BingTranslator,
-        DeepLTranslator,
-        DeepLXTranslator,
-        OllamaTranslator,
-        OpenAITranslator,
-        ZhipuTranslator,
-        ModelScopeTranslator,
-        SiliconTranslator,
-        GeminiTranslator,
-        AzureTranslator,
-        TencentTranslator,
-        DifyTranslator,
-        AnythingLLMTranslator,
-        XinferenceTranslator,
-        ArgosTranslator,
-        GrokTranslator,
-        GroqTranslator,
-        DeepseekTranslator,
-        OpenAIlikedTranslator,
-        QwenMtTranslator,
+    # 检查是否需要统计功能（babeldoc模式下可能也需要统计）
+    needs_statistics = (
+        getattr(parsed_args, 'analysis_only', False) or 
+        getattr(parsed_args, 'analysis_report', False) or 
+        getattr(parsed_args, 'statistics', False)
     )
     
-    # 查找匹配的翻译器
-    translator = None
-    for translator_class in [
-        GoogleTranslator,
-        BingTranslator,
-        DeepLTranslator,
-        DeepLXTranslator,
-        OllamaTranslator,
-        XinferenceTranslator,
-        AzureOpenAITranslator,
-        OpenAITranslator,
-        ZhipuTranslator,
-        ModelScopeTranslator,
-        SiliconTranslator,
-        GeminiTranslator,
-        AzureTranslator,
-        TencentTranslator,
-        DifyTranslator,
-        AnythingLLMTranslator,
-        ArgosTranslator,
-        GrokTranslator,
-        GroqTranslator,
-        DeepseekTranslator,
-        OpenAIlikedTranslator,
-        QwenMtTranslator,
-    ]:
-        if service_name == translator_class.name:
-            translator = translator_class(
-                parsed_args.lang_in,
-                parsed_args.lang_out,
-                service_model,
-                envs=envs,
-                prompt=prompt,
-                ignore_cache=getattr(parsed_args, 'ignore_cache', False),
-            )
-            break
+    # 初始化统计功能
+    stats_obj = initialize_statistics(
+        needs_statistics=needs_statistics,
+        files=parsed_args.files,
+        service=getattr(parsed_args, 'service', ''),
+        thread_count=getattr(parsed_args, 'thread', 4)
+    )
     
-    if not translator:
-        raise ValueError("Unsupported translation service")
-    
-    # 打印翻译服务信息
-    service_info = translator.get_service_info()
-    logger.info("==================== 翻译服务信息 ====================")
-    logger.info(f"服务名称: {service_info['name']}")
-    logger.info(f"使用模型: {service_info['model']}")
-    logger.info(f"源语言: {service_info['lang_in']} -> 目标语言: {service_info['lang_out']}")
-    logger.info(f"缓存启用: {'是' if service_info['cache_enabled'] else '否'}")
-    if 'envs' in service_info and service_info['envs']:
-        logger.info("服务配置:")
-        for key, value in service_info['envs'].items():
-            # 对于API密钥等敏感信息，只显示部分内容
-            if any(sensitive in key.lower() for sensitive in ['key', 'token', 'secret']):
-                if value and len(str(value)) > 8:
-                    value = f"{str(value)[:4]}...{str(value)[-4:]}"
-            logger.info(f"  {key}: {value}")
-    logger.info("===================================================")
-    
-    # 获取字体路径
-    from pdf2zh.high_level import download_remote_fonts
-    font_path = download_remote_fonts(parsed_args.lang_out.lower())
-    
-    # 处理文件列表
-    untranlate_file = parsed_args.files
-    if parsed_args.dir:
-        untranlate_file = find_all_files_in_directory(parsed_args.files[0])
-    
-    # 设置输出目录
-    outputdir = parsed_args.output or "."
-    
-    # 开始翻译
-    import asyncio
-    
-    for file in untranlate_file:
-        file = file.strip("\"'")
-        yadt_config = YadtConfig(
-            input_file=file,
-            font=font_path,
-            pages=",".join((str(x) for x in getattr(parsed_args, "raw_pages", []))),
-            output_dir=outputdir,
-            doc_layout_model=None,
-            translator=translator,
-            debug=parsed_args.debug,
-            lang_in=parsed_args.lang_in,
-            lang_out=parsed_args.lang_out,
-            no_dual=False,
-            no_mono=False,
-            qps=parsed_args.thread,
+    try:
+        # 解析服务参数
+        param = parsed_args.service.split(":", 1)
+        service_name = param[0]
+        service_model = param[1] if len(param) > 1 else None
+        
+        # 设置环境变量
+        envs = getattr(parsed_args, 'envs', {}) or {}
+        
+        # 处理自定义prompt
+        prompt = None
+        if parsed_args.prompt:
+            try:
+                with open(parsed_args.prompt, "r", encoding="utf-8") as file:
+                    content = file.read()
+                prompt = Template(content)
+            except Exception:
+                raise ValueError("prompt error.")
+        
+        # 导入所有翻译器
+        from pdf2zh.translator import (
+            AzureOpenAITranslator,
+            GoogleTranslator,
+            BingTranslator,
+            DeepLTranslator,
+            DeepLXTranslator,
+            OllamaTranslator,
+            OpenAITranslator,
+            ZhipuTranslator,
+            ModelScopeTranslator,
+            SiliconTranslator,
+            GeminiTranslator,
+            AzureTranslator,
+            TencentTranslator,
+            DifyTranslator,
+            AnythingLLMTranslator,
+            XinferenceTranslator,
+            ArgosTranslator,
+            GrokTranslator,
+            GroqTranslator,
+            DeepseekTranslator,
+            OpenAIlikedTranslator,
+            QwenMtTranslator,
         )
         
-        # 使用正确的babeldoc翻译方式
-        async def yadt_translate_coro(yadt_config):
-            async for event in babeldoc_translate(yadt_config):
-                if yadt_config.debug:
-                    logger.debug(event)
-                if event["type"] == "finish":
-                    result = event["translate_result"]
-                    logger.info("Translation Result:")
-                    logger.info(f"  Original PDF: {result.original_pdf_path}")
-                    logger.info(f"  Time Cost: {result.total_seconds:.2f}s")
-                    logger.info(f"  Mono PDF: {result.mono_pdf_path or 'None'}")
-                    logger.info(f"  Dual PDF: {result.dual_pdf_path or 'None'}")
-                    return result
+        # 查找匹配的翻译器
+        translator = None
+        for translator_class in [
+            GoogleTranslator,
+            BingTranslator,
+            DeepLTranslator,
+            DeepLXTranslator,
+            OllamaTranslator,
+            XinferenceTranslator,
+            AzureOpenAITranslator,
+            OpenAITranslator,
+            ZhipuTranslator,
+            ModelScopeTranslator,
+            SiliconTranslator,
+            GeminiTranslator,
+            AzureTranslator,
+            TencentTranslator,
+            DifyTranslator,
+            AnythingLLMTranslator,
+            ArgosTranslator,
+            GrokTranslator,
+            GroqTranslator,
+            DeepseekTranslator,
+            OpenAIlikedTranslator,
+            QwenMtTranslator,
+        ]:
+            if service_name == translator_class.name:
+                translator = translator_class(
+                    parsed_args.lang_in,
+                    parsed_args.lang_out,
+                    service_model,
+                    envs=envs,
+                    prompt=prompt,
+                    ignore_cache=getattr(parsed_args, 'ignore_cache', False),
+                )
+                break
         
-        result = asyncio.run(yadt_translate_coro(yadt_config))
-        logger.info(f"BabelDoc translation completed: {result}")
+        if not translator:
+            raise ValueError("Unsupported translation service")
+        
+        # 打印翻译服务信息
+        service_info = translator.get_service_info()
+        logger.info("==================== 翻译服务信息 ====================")
+        logger.info(f"服务名称: {service_info['name']}")
+        logger.info(f"使用模型: {service_info['model']}")
+        logger.info(f"源语言: {service_info['lang_in']} -> 目标语言: {service_info['lang_out']}")
+        logger.info(f"缓存启用: {'是' if service_info['cache_enabled'] else '否'}")
+        if 'envs' in service_info and service_info['envs']:
+            logger.info("服务配置:")
+            for key, value in service_info['envs'].items():
+                # 对于API密钥等敏感信息，只显示部分内容
+                if any(sensitive in key.lower() for sensitive in ['key', 'token', 'secret']):
+                    if value and len(str(value)) > 8:
+                        value = f"{str(value)[:4]}...{str(value)[-4:]}"
+                logger.info(f"  {key}: {value}")
+        logger.info("===================================================")
+        
+        # 获取字体路径
+        from pdf2zh.high_level import download_remote_fonts
+        font_path = download_remote_fonts(parsed_args.lang_out.lower())
+        
+        # 处理文件列表
+        untranlate_file = parsed_args.files
+        if parsed_args.dir:
+            untranlate_file = find_all_files_in_directory(parsed_args.files[0])
+        
+        # 执行预分析（如果需要统计）
+        if needs_statistics and untranlate_file:
+            stats_obj = perform_pdf_pre_analysis(
+                stats_obj=stats_obj,
+                files=untranlate_file,
+                model=ModelInstance.value if hasattr(ModelInstance, 'value') else None,
+                pages=getattr(parsed_args, 'pages', None),
+                service=getattr(parsed_args, 'service', ''),
+                reasoning=getattr(parsed_args, 'reasoning', False)
+            )
+        
+        # 设置输出目录
+        outputdir = parsed_args.output or "."
+        
+        # 开始翻译
+        import asyncio
+        
+        for file in untranlate_file:
+            file = file.strip("\"'")
+            yadt_config = YadtConfig(
+                input_file=file,
+                font=font_path,
+                pages=",".join((str(x) for x in getattr(parsed_args, "raw_pages", []))),
+                output_dir=outputdir,
+                doc_layout_model=None,
+                translator=translator,
+                debug=parsed_args.debug,
+                lang_in=parsed_args.lang_in,
+                lang_out=parsed_args.lang_out,
+                no_dual=False,
+                no_mono=False,
+                qps=parsed_args.thread,
+            )
+            
+            # 使用正确的babeldoc翻译方式
+            async def yadt_translate_coro(yadt_config):
+                async for event in babeldoc_translate(yadt_config):
+                    if yadt_config.debug:
+                        logger.debug(event)
+                    if event["type"] == "finish":
+                        result = event["translate_result"]
+                        logger.info("Translation Result:")
+                        logger.info(f"  Original PDF: {result.original_pdf_path}")
+                        logger.info(f"  Time Cost: {result.total_seconds:.2f}s")
+                        logger.info(f"  Mono PDF: {result.mono_pdf_path or 'None'}")
+                        logger.info(f"  Dual PDF: {result.dual_pdf_path or 'None'}")
+                        return result
+            
+            result = asyncio.run(yadt_translate_coro(yadt_config))
+            logger.info(f"BabelDoc translation completed: {result}")
+        
+        return 0
     
-    return 0
+    except Exception as e:
+        logger.error(f"BabelDoc翻译过程中发生错误: {e}")
+        return 1
+    finally:
+        # 结束统计功能并生成报告
+        finalize_statistics(
+            stats_obj=stats_obj,
+            output_dir=getattr(parsed_args, 'output', '.'),
+            generate_report=needs_statistics
+        )
 
 
 def translate_file(
@@ -831,22 +990,25 @@ def translate_file(
     )
 
     # --- Statistics and Analysis ---
-    stats_obj: Optional[PDFTranslationStatistics] = None
     needs_statistics = analysis_only or generate_analysis_report
-    if needs_statistics:
-        # Perform pre-analysis first to get an initialized stats object
-        stats_obj = perform_pre_analysis(
-            pdf_bytes=pdf_bytes,
-            model=model,
-            pages=pages,
-            is_reasoning=is_reasoning,
-            cancellation_event=None,
-        )
-        # Now start the overall timer and set file names on this object
-        stats_obj.start_runtime_tracking()
-        stats_obj.set_input_files([input_file])
-        # Set runtime configuration
-        stats_obj.set_runtime_config(service=service, thread_count=thread)
+    
+    # 初始化统计功能
+    stats_obj = initialize_statistics(
+        needs_statistics=needs_statistics,
+        files=[input_file],
+        service=service,
+        thread_count=thread
+    )
+    
+    # 执行预分析
+    stats_obj = perform_pdf_pre_analysis(
+        stats_obj=stats_obj,
+        files=[input_file],
+        model=model,
+        pages=pages,
+        service=service,
+        reasoning=is_reasoning
+    )
 
     # --- Main Logic: Translation ---
     translated_file_path = None
@@ -875,10 +1037,8 @@ def translate_file(
 
             if translation_result and translation_result[0]:
                 translated_file_path = translation_result[0][0]
-                # Collect runtime stats if needed
-                if stats_obj:
-                    _, token_stats, paragraph_stats, table_stats = translation_result[:4]
-                    stats_obj = collect_runtime_stats(stats_obj, token_stats, paragraph_stats, table_stats)
+                # 收集翻译统计
+                stats_obj = collect_translation_statistics(stats_obj, translation_result)
                 logger.info(f"Translation successful. Output: {translated_file_path}")
             else:
                 logger.error("Translation failed.")
@@ -888,14 +1048,11 @@ def translate_file(
         return None, stats_obj
     finally:
         # --- Finalize Statistics and Reporting ---
-        if stats_obj:
-            stats_obj.end_runtime_tracking()
-            if generate_analysis_report:
-                try:
-                    log_file = stats_obj.generate_report_log(output_dir)
-                    logger.info(f"Statistics report saved to: {log_file}")
-                except Exception as e:
-                    logger.error(f"Failed to generate statistics report: {e}")
+        finalize_statistics(
+            stats_obj=stats_obj,
+            output_dir=output_dir,
+            generate_report=generate_analysis_report
+        )
     
     return translated_file_path, stats_obj
 

@@ -303,12 +303,20 @@ class PDFTranslationStatistics:
             生成的日志文件路径
         """
         # 确保输出目录存在
-        os.makedirs(output_dir, exist_ok=True)
-        logger.debug(f"准备在目录 {output_dir} 生成统计报告...")
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+            logger.debug(f"准备在目录 {output_dir} 生成统计报告...")
+        except Exception as e:
+            logger.error(f"创建输出目录失败: {e}")
+            # 如果创建目录失败，使用当前目录
+            output_dir = "."
+            logger.warning("将使用当前目录作为输出目录")
 
         # 生成文件名
         if self.input_files:
             base_filename = os.path.splitext(os.path.basename(self.input_files[0]))[0]
+            # 移除文件名中可能存在的路径分隔符
+            base_filename = base_filename.replace('/', '_').replace('\\', '_')
             logger.debug(f"使用输入文件名作为基础: {base_filename}")
         else:
             base_filename = "pdf_translation"
