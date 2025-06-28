@@ -45,7 +45,7 @@ def run_translation_test(concurrent_mode: bool):
             output_dir=output_path,  # Using correct parameter name
             service="xinference:qwen3",
             # pages=pages_to_translate, # This was commented out in user's snippet
-            thread=16,
+            thread=4,
             debug=DEBUG_MODE, # Use the flag from the top
             ignore_cache=True,
             use_concurrent_table_translation=concurrent_mode,
@@ -68,10 +68,10 @@ if not os.path.exists(output_directory):
     os.makedirs(output_directory)
 
 # Run test for concurrent mode
-concurrent_time = run_translation_test(concurrent_mode=True)
+concurrent_time = run_translation_test(concurrent_mode=False)
 
 # Run test for serial mode
-serial_time = run_translation_test(concurrent_mode=False)
+serial_time = run_translation_test(concurrent_mode=True)
 
 # --- Final Report ---
 if concurrent_time > 0 and serial_time > 0:

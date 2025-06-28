@@ -520,32 +520,24 @@ class TranslateConverter(PDFConverterEx):
                 cells = table_region.extract_table_structure(all_chars, all_lines)
                 
                 if cells:
-                    # 根据开关选择翻译模式
+                    self.table_stats["total_cells"] += len(cells)
                     if self.use_concurrent_table_translation:
-                        # --- 并发翻译模式 ---
                         if self.concurrent_table_translator is None:
                             self.concurrent_table_translator = ConcurrentTableTranslator(
                                 translator=self.translator,
                                 fontmap=self.fontmap,
                                 noto=self.noto,
                                 noto_name=self.noto_name,
-                                thread_count=self.thread
+                                thread_count=self.thread,
                             )
-                        
-                        self.table_stats["total_cells"] += len(cells)
-                        
                         try:
                             table_region = self.concurrent_table_translator.translate_table_concurrent(table_region)
-                            # 在并发翻译器内部统计，这里不再重复统计
                             table_regions[table_id] = table_region
                             logger.info(f"完成表格 {table_id} 的并发翻译，共处理 {len(cells)} 个单元格")
                         except Exception as e:
                             logger.error(f"表格 {table_id} 并发翻译失败，回退到串行翻译: {e}")
-                            # 触发回退
                             self._translate_table_serially(table_region, table_id, cells, table_regions)
-
                     else:
-                        # --- 串行翻译模式 ---
                         self._translate_table_serially(table_region, table_id, cells, table_regions)
 
         def vflag(font: str, char: str):    # 匹配公式（和角标）字体
@@ -991,14 +983,14 @@ class TranslateConverter(PDFConverterEx):
                     else:
                         # 传统字体选择逻辑
                         fcur = None
-                        if cell.chars:
-                            try:
-                                if self.fontmap["tiro"].to_unichr(ord(text[0])) == text[0]:
-                                    fcur = "tiro"
-                            except Exception:
-                                pass
-                        if fcur is None:
-                            fcur = self.noto_name
+                    if cell.chars:
+                        try:
+                            if self.fontmap["tiro"].to_unichr(ord(text[0])) == text[0]:
+                                fcur = "tiro"
+                        except Exception:
+                            pass
+                    if fcur is None:
+                        fcur = self.noto_name
                     
                     # 使用优化后的字体大小（如果经过空间优化）
                     cell_size = cell.font_size
