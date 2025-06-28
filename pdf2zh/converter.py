@@ -462,6 +462,7 @@ class TranslateConverter(PDFConverterEx):
         
         # 初始化并发表格翻译器
         self.concurrent_table_translator = None
+        self.serial_table_translator = None
 
     def get_paragraph_stats(self) -> dict:
         """获取段落统计信息"""
@@ -531,14 +532,20 @@ class TranslateConverter(PDFConverterEx):
                                 thread_count=self.thread,
                             )
                         try:
-                            table_region = self.concurrent_table_translator.translate_table_concurrent(table_region)
+                            table_region = self.concurrent_table_translator.translate_table_concurrent(table_region, self.table_stats)
                             table_regions[table_id] = table_region
                             logger.info(f"完成表格 {table_id} 的并发翻译，共处理 {len(cells)} 个单元格")
                         except Exception as e:
                             logger.error(f"表格 {table_id} 并发翻译失败，回退到串行翻译: {e}")
-                            self._translate_table_serially(table_region, table_id, cells, table_regions)
+                            if self.serial_table_translator is None:
+                                self.serial_table_translator = SerialTableTranslator(translator=self.translator)
+                            table_region = self.serial_table_translator.translate_table(table_region, self.table_stats)
+                            table_regions[table_id] = table_region
                     else:
-                        self._translate_table_serially(table_region, table_id, cells, table_regions)
+                        if self.serial_table_translator is None:
+                            self.serial_table_translator = SerialTableTranslator(translator=self.translator)
+                        table_region = self.serial_table_translator.translate_table(table_region, self.table_stats)
+                        table_regions[table_id] = table_region
 
         def vflag(font: str, char: str):    # 匹配公式（和角标）字体
             if isinstance(font, bytes):     # 不一定能 decode，直接转 str
@@ -1094,12 +1101,13 @@ class ConcurrentTableTranslator:
         self.layout_config = TableLayoutConfig()
         self._lock = threading.Lock()
         
-    def translate_table_concurrent(self, table_region: 'TableRegion') -> 'TableRegion':
+    def translate_table_concurrent(self, table_region: 'TableRegion', table_stats: dict) -> 'TableRegion':
         """
         并发翻译表格区域
         
         Args:
             table_region: 表格区域对象
+            table_stats: 用于累计统计信息的可变字典。
             
         Returns:
             翻译完成的表格区域对象
@@ -1109,20 +1117,44 @@ class ConcurrentTableTranslator:
             return table_region
             
         logger.info(f"开始并发翻译表格 {table_region.table_id}，共 {len(cells)} 个单元格")
+        table_stats["total_cells"] += len(cells)
         
-        # 1. 预处理：分析表格结构和空间约束
-        cell_tasks, grid_layout = self._prepare_translation_tasks(cells)
+        # 1. 预处理：分析表格结构和空间约束，并准备翻译任务
+        tasks = []
+        grid_layout = self._analyze_grid_structure(cells)
         
-        # 2. 处理不需要翻译的单元格
-        self._process_non_translation_cells(cells)
+        for cell_idx, cell in enumerate(cells):
+            cell_text = cell.text.strip()
+            # 处理不需要翻译的单元格并更新统计
+            if not cell_text:
+                table_stats["skipped_empty"] += 1
+                cell.translated_text = ""
+                continue
+            if not re.search(r'[\u4e00-\u9fff]|[a-zA-Z]', cell_text):
+                table_stats["skipped_no_text"] += 1
+                cell.translated_text = cell_text
+                continue
+            
+            # 为需要翻译的单元格创建任务
+            row_idx, col_idx = self._find_cell_position(cell, grid_layout)
+            task = CellTranslationTask(
+                cell_idx=cell_idx,
+                cell=cell,
+                text=cell_text,
+                row_idx=row_idx,
+                col_idx=col_idx
+            )
+            tasks.append(task)
         
-        # 3. 并发翻译阶段（仅处理需要翻译的单元格）
-        translated_tasks = self._execute_concurrent_translation(cell_tasks)
+        logger.debug(f"准备了 {len(tasks)} 个翻译任务")
         
-        # 4. 后处理：空间冲突检测和布局优化
+        # 2. 并发翻译阶段
+        translated_tasks = self._execute_concurrent_translation(tasks, table_stats)
+        
+        # 3. 后处理：空间冲突检测和布局优化
         optimized_cells = self._optimize_layout(translated_tasks, grid_layout, table_region)
         
-        # 5. 更新表格区域
+        # 4. 更新表格区域
         table_region.cells = optimized_cells
         
         logger.info(f"完成表格 {table_region.table_id} 的并发翻译和布局优化")
@@ -1214,12 +1246,13 @@ class ConcurrentTableTranslator:
                 
         return row_idx, col_idx
         
-    def _execute_concurrent_translation(self, tasks: List[CellTranslationTask]) -> List[CellTranslationTask]:
+    def _execute_concurrent_translation(self, tasks: List[CellTranslationTask], table_stats: dict) -> List[CellTranslationTask]:
         """
         执行并发翻译
         
         Args:
             tasks: 翻译任务列表
+            table_stats: 用于累计统计信息的可变字典。
             
         Returns:
             完成翻译的任务列表
@@ -1239,6 +1272,7 @@ class ConcurrentTableTranslator:
                 
                 with self._lock:
                     logger.debug(f"[并发表格翻译] 单元格 {task.cell_idx} 输出: '{translated_text}'")
+                    table_stats["translated"] += 1
                 
                 return task
             except Exception as e:
@@ -1484,3 +1518,51 @@ def demonstrate_concurrent_table_translation():
 - 排版质量：保持甚至优于原版（空间优化算法）
 - 系统稳定性：完善的错误处理和回退机制
 """
+
+class SerialTableTranslator:
+    """
+    串行表格翻译器
+    
+    负责处理表格单元格的串行翻译。
+    这是一个简单的实现，用于与并发翻译器对齐。
+    """
+    def __init__(self, translator: BaseTranslator):
+        self.translator = translator
+
+    def translate_table(self, table_region: 'TableRegion', table_stats: dict) -> 'TableRegion':
+        """
+        串行翻译一个表格区域。
+        
+        Args:
+            table_region: 要翻译的表格区域对象。
+            table_stats: 用于累计统计信息的可变字典。
+            
+        Returns:
+            翻译完成的表格区域对象。
+        """
+        cells = table_region.cells
+        logger.info(f"开始串行翻译表格 {table_region.table_id} 的 {len(cells)} 个单元格")
+        table_stats["total_cells"] += len(cells)
+
+        for cell in cells:
+            cell_text = cell.text.strip()
+            if not cell_text:
+                table_stats["skipped_empty"] += 1
+                cell.translated_text = cell_text
+                continue
+            
+            if re.search(r'[\u4e00-\u9fff]|[a-zA-Z]', cell_text):
+                try:
+                    translated_text = self.translator.translate(cell_text)
+                    cell.translated_text = translated_text
+                    table_stats["translated"] += 1
+                except Exception as e:
+                    logger.warning(f"Failed to translate table cell '{cell_text}': {e}")
+                    cell.translated_text = cell_text
+            else:
+                table_stats["skipped_no_text"] += 1
+                cell.translated_text = cell_text
+        
+        logger.info(f"表格 {table_region.table_id} 的串行翻译完成，共处理 {len(cells)} 个单元格")
+        return table_region
+    
