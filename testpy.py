@@ -1,54 +1,90 @@
 import os
 import logging
+import time
 from pdf2zh import translate_file
 from rich.logging import RichHandler
 
-# --- 配置日志记录 ---
-# `debug=True` 会将 pdf2zh 的日志级别设为 DEBUG，但我们仍需配置一个 Handler 来显示它们。
-# 我们将根日志级别设为 INFO，然后只把 pdf2zh 的级别调低，这样可以避免其他库产生过多的日志。
+# --- Configuration ---
+# Set to True to see detailed DEBUG logs from the pdf2zh library
+DEBUG_MODE = False
+
+# --- Logging Setup ---
+log_level = logging.DEBUG if DEBUG_MODE else logging.INFO
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.INFO, # Keep root logger at INFO
     format="%(message)s",
     datefmt="[%X]",
     handlers=[RichHandler(rich_tracebacks=True, show_path=False)]
 )
-# 为了在控制台看到 `debug=True` 带来的详细日志
-logging.getLogger("pdf2zh").setLevel(logging.DEBUG)
+# Control pdf2zh's logger level from here
+logging.getLogger("pdf2zh").setLevel(log_level)
 
 
-# --- 配置您的翻译任务 ---
-input_pdf = "/data1/PDFMathTranslate/files/2006-Blom-4.pdf"
+# --- Translation Task Config ---
+input_pdf = "/data1/PDFMathTranslate/files/2006-Blom-4.pdf" # Using the file from the user's log
 output_directory = "/data1/PDFMathTranslate/translated_files"
-# pages_to_translate = [1, 2, 3] # 翻译第 2-4 页
+# pages_to_translate = [1, 2, 3] # Uncomment to translate specific pages
+base_filename = os.path.splitext(os.path.basename(input_pdf))[0]
 
-# --- 执行翻译并生成报告 ---
-print(f"开始翻译文件: {os.path.basename(input_pdf)}")
-translated_path, stats = translate_file(
-    input_file=input_pdf,
-    output_dir=output_directory,
-    service="azure-openai",
-    # pages=pages_to_translate,
-    thread=500,
-    generate_analysis_report=True, # 启用统计报告生成,
-    debug=True,
-    ignore_cache=True, # 添加此项以禁用缓存，获得与命令行相似的行为
-)
 
-# --- 查看结果 ---
-if translated_path:
-    print(f"✓ 翻译成功！文件保存在: {translated_path}")
-if stats:
-    print(f"✓ 已生成统计信息。")
-    print(f"  - 总耗时: {stats.get_total_time():.2f} 秒")
-    # 您可以访问 stats 对象的其他属性获取更多信息
+# --- Test Runner ---
+def run_translation_test(concurrent_mode: bool):
+    """Runs a single translation test and returns the elapsed time."""
+    mode_str = "并发" if concurrent_mode else "串行"
+    print(f"\n--- Starting Test: Table Translation Mode [{mode_str}] ---")
+    
+    output_filename = f"{base_filename}_{mode_str}.pdf"
+    output_path = os.path.join(output_directory, output_filename)
+    
+    start_time = time.time()
+    
+    try:
+        # Corrected function call with proper parameter names
+        translate_file(
+            input_file=input_pdf,  # Using correct parameter name
+            output_dir=output_path,  # Using correct parameter name
+            service="xinference:qwen3",
+            # pages=pages_to_translate, # This was commented out in user's snippet
+            thread=16,
+            debug=DEBUG_MODE, # Use the flag from the top
+            ignore_cache=True,
+            use_concurrent_table_translation=concurrent_mode,
+        )
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        
+        print(f"✓ {mode_str} mode translation finished!")
+        print(f"  - File saved to: {output_path}")
+        print(f"  - Total time: {elapsed_time:.2f} seconds")
+        return elapsed_time
+    except Exception as e:
+        # Using rich handler's traceback printing
+        logging.error(f"❌ {mode_str} mode translation failed.", exc_info=True)
+        return -1
 
-# # --- 或者，只执行分析 ---
-# print("\n开始仅分析模式...")
-# _, analysis_stats = translate_file(
-#     input_file=input_pdf,
-#     analysis_only=True,
-#     generate_analysis_report=True
-# )
 
-# if analysis_stats:
-#     print(f"✓ 分析完成。预估翻译 token 数: {analysis_stats.get_estimated_total_tokens()}")
+# --- Main Execution ---
+if not os.path.exists(output_directory):
+    os.makedirs(output_directory)
+
+# Run test for concurrent mode
+concurrent_time = run_translation_test(concurrent_mode=True)
+
+# Run test for serial mode
+serial_time = run_translation_test(concurrent_mode=False)
+
+# --- Final Report ---
+if concurrent_time > 0 and serial_time > 0:
+    print("\n\n--- Final Performance Report ---")
+    print(f"  - Concurrent Mode Time: {concurrent_time:.2f} seconds")
+    print(f"  - Serial Mode Time: {serial_time:.2f} seconds")
+    
+    if concurrent_time < serial_time:
+        improvement = ((serial_time - concurrent_time) / serial_time) * 100
+        print(f"\n🚀 Conclusion: Concurrent mode improved performance by {improvement:.2f}%")
+    else:
+        degradation = ((concurrent_time - serial_time) / serial_time) * 100
+        print(f"\n🤔 Conclusion: Concurrent mode was {degradation:.2f}% slower. This can happen if the overhead of threading outweighs the translation time for very small tables.")
+else:
+    print("\nCould not generate a comparison report because one or both test runs failed.")
+

@@ -230,10 +230,18 @@ def create_parser() -> argparse.ArgumentParser:
         help="Use alternative reasoning mode for time estimation (true/false).",
     )
 
+    parse_params.add_argument(
+        "--no-concurrent-table-translation",
+        dest="use_concurrent_table_translation",
+        default=True,
+        action="store_false",
+        help="Disable concurrent translation for tables.",
+    )
+
     return parser
 
 
-def parse_args(args: Optional[List[str]]) -> argparse.Namespace:
+def parse_args(args: Optional[List[str]] = None) -> argparse.Namespace:
     parsed_args = create_parser().parse_args(args=args)
 
     if parsed_args.pages:
@@ -674,6 +682,7 @@ def translate_file(
     reasoning: bool = False,
     ignore_cache: bool = False,
     debug: bool = False,
+    use_concurrent_table_translation: bool = True,
     **kwargs: Any,
 ) -> (Optional[str], Optional[PDFTranslationStatistics]):
     """
@@ -699,6 +708,7 @@ def translate_file(
         reasoning: Use alternative reasoning mode for time estimation.
         ignore_cache: Ignore cache and force re-translation.
         debug: If True, enables debug logging level.
+        use_concurrent_table_translation: Whether to enable concurrent translation for tables.
         **kwargs: Additional arguments for the `translate` function.
 
     Returns:
@@ -788,6 +798,7 @@ def translate_file(
                 model=model,
                 ignore_cache=ignore_cache,
                 stats_obj=stats_obj,
+                use_concurrent_table_translation=use_concurrent_table_translation,
                 **kwargs,
             )
 

@@ -418,7 +418,7 @@ class XinferenceTranslator(BaseTranslator):
     name = "xinference"
     envs = {
         "XINFERENCE_HOST": "http://127.0.0.1:9997",
-        "XINFERENCE_MODEL": "deepseek-r1-distill-qwen-0",
+        "XINFERENCE_MODEL": "qwen3",
     }
     CustomPrompt = True
 
