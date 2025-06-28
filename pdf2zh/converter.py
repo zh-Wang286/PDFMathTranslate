@@ -1021,33 +1021,6 @@ class TranslateConverter(PDFConverterEx):
         ops = f"BT {''.join(ops_list)}ET "
         return ops
 
-    def _translate_table_serially(self, table_region, table_id, cells, table_regions):
-        """原始的串行表格翻译逻辑"""
-        logger.info(f"开始串行翻译表格 {table_id} 的 {len(cells)} 个单元格")
-        self.table_stats["total_cells"] += len(cells)
-        
-        for cell_idx, cell in enumerate(cells):
-            cell_text = cell.text.strip()
-            if not cell_text:
-                self.table_stats["skipped_empty"] += 1
-                cell.translated_text = cell_text
-                continue
-                
-            if re.search(r'[\u4e00-\u9fff]|[a-zA-Z]', cell_text):
-                try:
-                    translated_text = self.translator.translate(cell_text)
-                    cell.translated_text = translated_text
-                    self.table_stats["translated"] += 1
-                except Exception as e:
-                    logger.warning(f"Failed to translate table cell '{cell_text}': {e}")
-                    cell.translated_text = cell_text
-            else:
-                cell.translated_text = cell_text
-                self.table_stats["skipped_no_text"] += 1
-        
-        table_regions[table_id] = table_region
-        logger.info(f"表格 {table_id} 的串行翻译完成，共处理 {len(cells)} 个单元格")
-
 
 class OpType(Enum):
     TEXT = "text"
@@ -1079,6 +1052,54 @@ class TableLayoutConfig:
     max_font_size: float = 24.0
     font_size_step: float = 0.5
     overlap_tolerance: float = 2.0  # 允许的重叠像素容忍度
+    
+
+class SerialTableTranslator:
+    """
+    串行表格翻译器
+    
+    负责处理表格单元格的串行翻译。
+    这是一个简单的实现，用于与并发翻译器对齐。
+    """
+    def __init__(self, translator: BaseTranslator):
+        self.translator = translator
+
+    def translate_table(self, table_region: 'TableRegion', table_stats: dict) -> 'TableRegion':
+        """
+        串行翻译一个表格区域。
+        
+        Args:
+            table_region: 要翻译的表格区域对象。
+            table_stats: 用于累计统计信息的可变字典。
+            
+        Returns:
+            翻译完成的表格区域对象。
+        """
+        cells = table_region.cells
+        logger.info(f"开始串行翻译表格 {table_region.table_id} 的 {len(cells)} 个单元格")
+        table_stats["total_cells"] += len(cells)
+
+        for cell in cells:
+            cell_text = cell.text.strip()
+            if not cell_text:
+                table_stats["skipped_empty"] += 1
+                cell.translated_text = cell_text
+                continue
+            
+            if re.search(r'[\u4e00-\u9fff]|[a-zA-Z]', cell_text):
+                try:
+                    translated_text = self.translator.translate(cell_text)
+                    cell.translated_text = translated_text
+                    table_stats["translated"] += 1
+                except Exception as e:
+                    logger.warning(f"Failed to translate table cell '{cell_text}': {e}")
+                    cell.translated_text = cell_text
+            else:
+                table_stats["skipped_no_text"] += 1
+                cell.translated_text = cell_text
+        
+        logger.info(f"表格 {table_region.table_id} 的串行翻译完成，共处理 {len(cells)} 个单元格")
+        return table_region
     
 
 class ConcurrentTableTranslator:
@@ -1448,121 +1469,3 @@ class ConcurrentTableTranslator:
                     cell.translated_text = cell_text
                 # 需要翻译的单元格将在并发翻译阶段处理
 
-
-def demonstrate_concurrent_table_translation():
-    """
-    演示并发表格翻译功能的使用方法
-    
-    这个函数展示了如何使用新的ConcurrentTableTranslator类：
-    1. 创建并发翻译器实例
-    2. 处理表格区域
-    3. 应用空间优化
-    
-    注意：这是一个演示函数，实际使用时会在TranslateConverter.receive_layout()中自动调用
-    """
-    # 伪代码示例 - 实际使用中这些参数会从TranslateConverter传入
-    logger.info("=== 并发表格翻译功能演示 ===")
-    logger.info("1. 空间冲突检测：自动调整字体大小以适应单元格边界")
-    logger.info("2. 字体一致性管理：统一表格内的字体选择策略") 
-    logger.info("3. 结构完整性保障：维护表格的行列对齐关系")
-    logger.info("4. 线程安全并发：支持多线程同时翻译不同单元格")
-    logger.info("5. 智能回退机制：并发失败时自动回退到串行翻译")
-    
-    # 主要特性说明
-    features = {
-        "并发翻译": "使用ThreadPoolExecutor实现多线程翻译，显著提升吞吐量",
-        "空间优化": "预测翻译后文本长度，自动调整字体大小避免溢出",
-        "智能字体选择": "根据文本特征选择最适合的字体（Tiro/Noto）",
-        "网格结构分析": "解析表格行列结构，保持空间关系一致性",
-        "错误处理": "完善的异常处理和回退机制，确保翻译鲁棒性"
-    }
-    
-    logger.info("=== 核心功能特性 ===")
-    for feature, description in features.items():
-        logger.info(f"• {feature}: {description}")
-    
-    logger.info("=== 性能提升预期 ===")
-    logger.info("• 并发度：根据线程配置，理论上可获得2-4倍的翻译速度提升")
-    logger.info("• 吞吐量：多个单元格可同时发送翻译请求，提高模型利用率")
-    logger.info("• 质量保证：空间优化确保翻译结果不破坏原始表格布局")
-    
-    return True
-
-
-# 性能对比说明
-"""
-并发表格翻译 vs 串行表格翻译性能对比：
-
-原始串行方式：
-- 处理模式：逐个单元格串行翻译 
-- 并发度：1（单线程）
-- 模型利用率：低（频繁等待单个请求完成）
-- 吞吐量指标：Running: 1 req, Pending: 0 reqs
-
-优化并发方式：
-- 处理模式：多单元格并行翻译
-- 并发度：可配置（默认2-4线程）
-- 模型利用率：高（批量请求保持模型忙碌）
-- 吞吐量指标：Running: 4-8 reqs, Pending: 2+ reqs
-
-关键技术突破：
-1. 空间冲突检测算法：预测文本长度，避免布局破坏
-2. 网格结构分析：维护表格行列对齐关系
-3. 字体一致性管理：确保视觉统一性
-4. 线程安全机制：保证并发访问数据安全性
-5. 智能回退策略：确保功能鲁棒性
-
-预期效果：
-- 翻译速度提升：2-4倍（取决于表格复杂度和线程配置）
-- 模型吞吐量：显著提升（从单请求变为批量请求）
-- 排版质量：保持甚至优于原版（空间优化算法）
-- 系统稳定性：完善的错误处理和回退机制
-"""
-
-class SerialTableTranslator:
-    """
-    串行表格翻译器
-    
-    负责处理表格单元格的串行翻译。
-    这是一个简单的实现，用于与并发翻译器对齐。
-    """
-    def __init__(self, translator: BaseTranslator):
-        self.translator = translator
-
-    def translate_table(self, table_region: 'TableRegion', table_stats: dict) -> 'TableRegion':
-        """
-        串行翻译一个表格区域。
-        
-        Args:
-            table_region: 要翻译的表格区域对象。
-            table_stats: 用于累计统计信息的可变字典。
-            
-        Returns:
-            翻译完成的表格区域对象。
-        """
-        cells = table_region.cells
-        logger.info(f"开始串行翻译表格 {table_region.table_id} 的 {len(cells)} 个单元格")
-        table_stats["total_cells"] += len(cells)
-
-        for cell in cells:
-            cell_text = cell.text.strip()
-            if not cell_text:
-                table_stats["skipped_empty"] += 1
-                cell.translated_text = cell_text
-                continue
-            
-            if re.search(r'[\u4e00-\u9fff]|[a-zA-Z]', cell_text):
-                try:
-                    translated_text = self.translator.translate(cell_text)
-                    cell.translated_text = translated_text
-                    table_stats["translated"] += 1
-                except Exception as e:
-                    logger.warning(f"Failed to translate table cell '{cell_text}': {e}")
-                    cell.translated_text = cell_text
-            else:
-                table_stats["skipped_no_text"] += 1
-                cell.translated_text = cell_text
-        
-        logger.info(f"表格 {table_region.table_id} 的串行翻译完成，共处理 {len(cells)} 个单元格")
-        return table_region
-    
