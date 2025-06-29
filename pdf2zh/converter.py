@@ -9,6 +9,7 @@ from string import Template
 from typing import Dict, List, Tuple, Optional
 
 import numpy as np
+import tqdm
 from pdfminer.converter import PDFConverter
 from pdfminer.layout import LTChar, LTFigure, LTLine, LTPage
 from pdfminer.pdffont import PDFCIDFont, PDFUnicodeNotDefined
@@ -16,6 +17,18 @@ from pdfminer.pdfinterp import PDFGraphicState, PDFResourceManager
 from pdfminer.utils import apply_matrix_pt, mult_matrix
 from pymupdf import Font
 from tenacity import retry, wait_fixed
+
+import asyncio
+import io
+from asyncio import CancelledError
+
+from pdfminer.pdfdocument import PDFDocument
+from pdfminer.pdfpage import PDFPage
+from pdfminer.pdfparser import PDFParser
+from pymupdf import Document
+
+from pdf2zh.doclayout import OnnxModel
+from pdf2zh.pdfinterp import PDFPageInterpreterEx
 
 from pdf2zh.translator import (
     AnythingLLMTranslator,
@@ -310,6 +323,101 @@ class AnalysisConverter(PDFConverterEx):
             "total_paragraph_count": 0,
             "total_table_cell_count": 0,
         }
+
+    def analyze_document(
+        self,
+        pdf_bytes: bytes,
+        model: OnnxModel,
+        cancellation_event: Optional[asyncio.Event] = None,
+    ) -> dict:
+        """
+        Analyzes a PDF file to gather statistics about its content.
+
+        Args:
+            pdf_bytes: The PDF content as bytes.
+            model: The ONNX layout analysis model.
+            cancellation_event: An event to signal cancellation.
+
+        Returns:
+            A dictionary containing the analysis results.
+        """
+        # Create two independent streams from the same bytes to avoid conflicts
+        inf_for_pdfminer = io.BytesIO(pdf_bytes)
+        inf_for_pymupdf = io.BytesIO(pdf_bytes)
+
+        interpreter = PDFPageInterpreterEx(self.rsrcmgr, self, {})
+
+        parser = PDFParser(inf_for_pdfminer)
+        doc = PDFDocument(parser)
+        doc_for_render = Document(stream=inf_for_pymupdf)
+
+        pages_to_process = self.pages_to_process
+        if not pages_to_process:  # if it's initialized to [], so if it's empty, use all pages
+            pages_to_process = list(range(doc_for_render.page_count))
+
+        with tqdm.tqdm(total=len(pages_to_process), desc="Analyzing PDF") as progress:
+            for pageno, page in enumerate(PDFPage.create_pages(doc)):
+                page.pageno = pageno
+
+                if pageno not in pages_to_process:
+                    continue
+
+                if cancellation_event and cancellation_event.is_set():
+                    raise CancelledError("Analysis task cancelled")
+
+                # Following the robust pattern from translate_patch:
+                # The 'page_xref' attribute is also required by the interpreter.
+                page.page_xref = doc_for_render.get_new_xref()
+
+                # --- Layout analysis (from translate_patch) ---
+                pix = doc_for_render[pageno].get_pixmap()
+                image = np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.width, 3)[:, :, ::-1]
+                page_layout = model.predict(image, imgsz=int(pix.height / 32) * 32)[0]
+                box = np.ones((pix.height, pix.width))
+                h, w = box.shape
+                vcls = ["abandon", "figure", "isolate_formula", "formula_caption"]
+                table_regions = []
+
+                for i, d in enumerate(page_layout.boxes):
+                    box_class = page_layout.names[int(d.cls)]
+                    x0, y0, x1, y1 = d.xyxy.squeeze()
+                    b_x0, b_y0, b_x1, b_y1 = (
+                        np.clip(int(x0 - 1), 0, w - 1),
+                        np.clip(int(h - y1 - 1), 0, h - 1),
+                        np.clip(int(x1 + 1), 0, w - 1),
+                        np.clip(int(h - y0 + 1), 0, h - 1),
+                    )
+
+                    if box_class == "table":
+                        table_id = -(i + 100)
+                        box[b_y0:b_y1, b_x0:b_x1] = table_id
+                        table_regions.append({'id': table_id, 'bbox': (b_x0, b_y0, b_x1, b_y1)})
+                    elif box_class not in vcls:
+                        box[b_y0:b_y1, b_x0:b_x1] = i + 2
+
+                if 'table_regions' not in self.layout:
+                    self.layout['table_regions'] = {}
+                self.layout['table_regions'][pageno] = table_regions
+
+                for i, d in enumerate(page_layout.boxes):
+                    if page_layout.names[int(d.cls)] in vcls:
+                        x0, y0, x1, y1 = d.xyxy.squeeze()
+                        x0, y0, x1, y1 = (
+                            np.clip(int(x0 - 1), 0, w - 1),
+                            np.clip(int(h - y1 - 1), 0, h - 1),
+                            np.clip(int(x1 + 1), 0, w - 1),
+                            np.clip(int(h - y0 + 1), 0, h - 1),
+                        )
+                        box[y0:y1, x0:x1] = 0
+
+                self.layout[pageno] = box
+                # --- End Layout analysis ---
+
+                interpreter.process_page(page)
+                progress.update()
+
+        self.close()
+        return self.stats
 
     def receive_layout(self, ltpage: LTPage):
         # 如果指定了页面范围，且当前页面不在范围内，则跳过
