@@ -31,6 +31,7 @@ class PDFTranslationStatistics:
     2. 项目运行时的实际数据  
     3. 统计报告生成
     """
+    _version = "2.1"  # Diagnostic version
 
     def __init__(self):
         # 项目开始时的估算数据

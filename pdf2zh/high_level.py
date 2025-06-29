@@ -8,7 +8,10 @@ import sys
 import tempfile
 import logging
 import time
+import uuid
 from asyncio import CancelledError
+from dataclasses import dataclass, asdict
+from datetime import datetime
 from pathlib import Path
 from string import Template
 from typing import Any, BinaryIO, List, Optional, Dict
@@ -26,6 +29,7 @@ from pymupdf import Document, Font
 from pdf2zh.converter import TranslateConverter
 from pdf2zh.doclayout import OnnxModel
 from pdf2zh.pdfinterp import PDFPageInterpreterEx
+from pdf2zh.statistics import PDFTranslationStatistics
 
 from pdf2zh.config import ConfigManager
 from babeldoc.assets.assets import get_font_and_metadata
@@ -324,13 +328,13 @@ def translate_stream(
     if not skip_subset_fonts:
         doc_zh.subset_fonts(fallback=True)
         doc_en.subset_fonts(fallback=True)
-    return (
-        doc_zh.write(deflate=True, garbage=3, use_objstms=1),
-        doc_en.write(deflate=True, garbage=3, use_objstms=1),
-        token_stats,
-        paragraph_stats,
-        table_stats,
-    )
+    return {
+        "mono_pdf": doc_zh.write(deflate=True, garbage=3, use_objstms=1),
+        "dual_pdf": doc_en.write(deflate=True, garbage=3, use_objstms=1),
+        "token_stats": token_stats,
+        "paragraph_stats": paragraph_stats,
+        "table_stats": table_stats,
+    }
 
 
 def convert_to_pdfa(input_path, output_path):
@@ -595,3 +599,380 @@ def download_remote_fonts(lang: str):
     logger.info(f"use font: {font_path}")
 
     return font_path
+
+
+def start_analysis_task(
+    pdf_bytes: bytes,
+    pages: Optional[List[int]] = None,
+    service: str = "",
+    reasoning: bool = False,
+    model: Optional[OnnxModel] = None,
+    cancellation_event: Optional[asyncio.Event] = None,
+    **kwargs: Any,
+) -> PDFTranslationStatistics:
+    """
+    阶段一：创建会话与预估分析
+    
+    执行纯粹的PDF内容分析，生成预估统计数据。
+    该函数不执行任何翻译操作，只进行内容分析和统计。
+    
+    Args:
+        pdf_bytes: PDF文件字节流
+        pages: 要分析的页面列表，None表示分析所有页面
+        service: 翻译服务名称（用于token预估）
+        reasoning: 是否启用推理模式
+        model: ONNX布局分析模型
+        cancellation_event: 取消事件
+        **kwargs: 其他分析参数
+        
+    Returns:
+        PDFTranslationStatistics: 包含预估数据的统计对象
+        
+    Raises:
+        PDFValueError: PDF处理错误
+        CancelledError: 任务被取消
+    """
+    logger.info("[阶段一] 开始PDF内容分析与预估")
+    
+    # 创建统计对象
+    session_id = str(uuid.uuid4())
+    stats_obj = PDFTranslationStatistics(
+        session_id=session_id,
+        created_at=datetime.now(),
+        file_info={
+            "size_bytes": len(pdf_bytes),
+            "pages_to_analyze": pages,
+        },
+        estimation={}
+    )
+    
+    # 开始分析时间追踪
+    stats_obj.start_analysis_tracking()
+    
+    try:
+        # 检查模型是否可用
+        if model is None:
+            raise PDFValueError("布局分析模型未提供")
+            
+        # 执行纯粹的内容分析
+        analysis_result = analyze_pdf(
+            pdf_bytes=pdf_bytes,
+            model=model,
+            pages=pages,
+            cancellation_event=cancellation_event,
+        )
+        
+        # 生成预估数据
+        estimation_data = {
+            "analysis_result": analysis_result,
+            "estimated_paragraphs": analysis_result.get("total_paragraph_count", 0),
+            "estimated_table_cells": analysis_result.get("total_table_cell_count", 0),
+            "estimated_paragraph_tokens": analysis_result.get("total_paragraph_tokens", 0),
+            "estimated_table_tokens": analysis_result.get("total_table_tokens", 0),
+            "total_estimated_tokens": (
+                analysis_result.get("total_paragraph_tokens", 0) + 
+                analysis_result.get("total_table_tokens", 0)
+            ),
+            "service": service,
+            "reasoning_enabled": reasoning,
+            "pages_analyzed": analysis_result.get("page_count", 0),
+        }
+        
+        # 计算预估成本和时间（基于历史数据的经验公式）
+        total_tokens = estimation_data["total_estimated_tokens"]
+        estimation_data.update({
+            "estimated_translation_time_seconds": max(30, total_tokens * 0.1),  # 经验值：每token 0.1秒
+            "estimated_cost_estimate": {
+                "tokens": total_tokens,
+                "service": service,
+                "note": "实际成本取决于具体的翻译服务定价"
+            }
+        })
+        
+        stats_obj.estimation = estimation_data
+        
+        # 结束分析时间追踪
+        stats_obj.end_analysis_tracking()
+        
+        logger.info(f"[阶段一] 分析完成，预估: {estimation_data['estimated_paragraphs']}段落, "
+                   f"{estimation_data['estimated_table_cells']}表格单元格, "
+                   f"{estimation_data['total_estimated_tokens']}tokens")
+        
+        return stats_obj
+        
+    except Exception as e:
+        stats_obj.end_analysis_tracking()
+        logger.error(f"[阶段一] 分析失败: {e}")
+        raise
+
+
+def execute_translation_only(
+    stream: bytes,
+    pages: Optional[List[int]] = None,
+    lang_in: str = "",
+    lang_out: str = "",
+    service: str = "",
+    thread: int = 0,
+    vfont: str = "",
+    vchar: str = "",
+    callback: Optional[object] = None,
+    compatible: bool = False,
+    model: Optional[OnnxModel] = None,
+    envs: Optional[Dict] = None,
+    prompt: Optional[Template] = None,
+    skip_subset_fonts: bool = False,
+    ignore_cache: bool = False,
+    use_concurrent_table_translation: bool = True,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    """
+    阶段二：执行纯翻译
+    
+    只负责执行PDF翻译，不包含任何分析或报告生成逻辑。
+    该函数是translate_stream的精简版本，专注于翻译执行。
+    
+    Args:
+        stream: PDF文件字节流
+        pages: 要翻译的页面列表
+        lang_in: 源语言
+        lang_out: 目标语言
+        service: 翻译服务
+        thread: 线程数
+        vfont: 公式字体规则
+        vchar: 公式字符规则
+        callback: 进度回调函数
+        compatible: 是否兼容模式
+        model: ONNX布局分析模型
+        envs: 环境变量
+        prompt: 翻译提示模板
+        skip_subset_fonts: 是否跳过字体子集化
+        ignore_cache: 是否忽略缓存
+        use_concurrent_table_translation: 是否使用并发表格翻译
+        **kwargs: 其他翻译参数
+        
+    Returns:
+        Dict[str, Any]: 包含翻译结果和原始统计数据的字典
+        {
+            "mono_pdf": bytes,  # 单语PDF字节流
+            "dual_pdf": bytes,  # 双语PDF字节流
+            "raw_runtime_stats": {
+                "token_stats": dict,
+                "paragraph_stats": dict,
+                "table_stats": dict
+            }
+        }
+        
+    Raises:
+        PDFValueError: PDF处理错误
+        ValueError: 参数错误
+    """
+    logger.info("[阶段二] 开始执行翻译")
+    
+    try:
+        # 检查必要参数
+        if not service:
+            raise ValueError("翻译服务参数不能为空")
+        if not lang_out:
+            raise ValueError("目标语言参数不能为空")
+        if model is None:
+            raise ValueError("布局分析模型未提供")
+            
+        # 调用核心翻译函数
+        result = translate_stream(
+            stream=stream,
+            pages=pages,
+            lang_in=lang_in,
+            lang_out=lang_out,
+            service=service,
+            thread=thread,
+            vfont=vfont,
+            vchar=vchar,
+            callback=callback,
+            compatible=compatible,
+            cancellation_event=None,  # 在阶段二中，取消由Celery管理
+            model=model,
+            envs=envs,
+            prompt=prompt,
+            skip_subset_fonts=skip_subset_fonts,
+            ignore_cache=ignore_cache,
+            use_concurrent_table_translation=use_concurrent_table_translation,
+            **kwargs,
+        )
+        
+        # translate_stream 返回的是一个字典，而不是元组
+        if isinstance(result, dict):
+            mono_pdf = result.get("mono_pdf")
+            dual_pdf = result.get("dual_pdf") 
+            token_stats = result.get("token_stats", {})
+            paragraph_stats = result.get("paragraph_stats", {})
+            table_stats = result.get("table_stats", {})
+        else:
+            # 如果是元组格式（向后兼容）
+            mono_pdf, dual_pdf, token_stats, paragraph_stats, table_stats = result
+        
+        # 构造返回数据
+        translation_result = {
+            "mono_pdf": mono_pdf,
+            "dual_pdf": dual_pdf,
+            "token_stats": token_stats,
+            "paragraph_stats": paragraph_stats,
+            "table_stats": table_stats,
+        }
+        
+        logger.info(f"[阶段二] 翻译完成，实际消耗: {token_stats.get('total_tokens', 0)}tokens, "
+                   f"翻译段落: {paragraph_stats.get('translated', 0)}, "
+                   f"翻译表格单元格: {table_stats.get('translated', 0)}")
+        
+        return translation_result
+        
+    except Exception as e:
+        logger.error(f"[阶段二] 翻译失败: {e}")
+        raise
+
+
+def finalize_statistics_data(
+    stats_obj: PDFTranslationStatistics,
+    raw_runtime_stats: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    阶段三：生成最终统计报告
+    
+    将预估数据和运行时数据合并，生成完整的统计报告。
+    该函数不产生任何文件，只负责数据处理和报告生成。
+    
+    Args:
+        stats_obj: 包含预估数据的统计对象
+        raw_runtime_stats: 运行时原始统计数据
+        
+    Returns:
+        Dict[str, Any]: 最终的统计报告JSON数据
+        {
+            "session_info": {...},
+            "estimation_summary": {...},
+            "runtime_summary": {...},
+            "comparison": {...},
+            "performance_metrics": {...}
+        }
+    """
+    logger.info("[阶段三] 开始生成最终统计报告")
+    
+    try:
+        # 正确提取关键数据 - 从runtime_summary的结构中获取
+        llm_stats = raw_runtime_stats.get("llm_stats", {})
+        translation_stats = raw_runtime_stats.get("translation_stats", {})
+        time_stats = raw_runtime_stats.get("time_stats", {})
+        
+        # 提取具体的统计数据
+        token_stats = {
+            "total_tokens": llm_stats.get("total_tokens", 0),
+            "prompt_tokens": llm_stats.get("input_tokens", 0),
+            "completion_tokens": llm_stats.get("output_tokens", 0),
+            "translation_count": llm_stats.get("call_count", 0),
+        }
+        
+        paragraph_stats = translation_stats.get("paragraphs", {})
+        table_stats = translation_stats.get("table_cells", {})
+        
+        # 从新的统计对象结构中获取预估数据
+        estimated_tokens = stats_obj.pre_stats.get("estimated_total_tokens", 0)
+        estimated_time = stats_obj.pre_stats.get("estimated_time_seconds", 0)
+        estimated_paragraphs = stats_obj.pre_stats.get("total_paragraph_count", 0)
+        estimated_table_cells = stats_obj.pre_stats.get("total_table_cell_count", 0)
+        estimated_pages = stats_obj.pre_stats.get("page_count", 0)
+        
+        # 计算差异和比较数据
+        actual_tokens = token_stats.get("total_tokens", 0)
+        token_diff_percent = 0
+        if estimated_tokens > 0:
+            token_diff_percent = ((actual_tokens - estimated_tokens) / estimated_tokens) * 100
+            
+        actual_time = time_stats.get("translation_time", 0)
+        time_diff_seconds = actual_time - estimated_time
+        
+        # 获取正确的文件大小 - 从会话管理器获取PDF数据大小
+        file_size_bytes = 0
+        if hasattr(stats_obj, '_session_file_size'):
+            file_size_bytes = stats_obj._session_file_size
+        
+        # 构造最终报告
+        final_report = {
+            "session_info": {
+                "session_id": "unknown",  # 新的统计对象没有session_id
+                "file_size_bytes": file_size_bytes,
+                "pages_processed": estimated_pages,
+            },
+            
+            "estimation_summary": {
+                "estimated_paragraphs": estimated_paragraphs,
+                "estimated_table_cells": estimated_table_cells,
+                "estimated_tokens": estimated_tokens,
+                "estimated_time_seconds": estimated_time,
+                "reasoning_enabled": stats_obj.is_reasoning_mode,
+            },
+            
+            "runtime_summary": {
+                "actual_tokens": {
+                    "total": actual_tokens,
+                    "prompt_tokens": token_stats.get("prompt_tokens", 0),
+                    "completion_tokens": token_stats.get("completion_tokens", 0),
+                    "translation_calls": token_stats.get("translation_count", 0),
+                },
+                "paragraphs": {
+                    "total": paragraph_stats.get("total", 0),
+                    "translated": paragraph_stats.get("translated", 0),
+                    "skipped_empty": paragraph_stats.get("skipped_empty", 0),
+                    "skipped_formula": paragraph_stats.get("skipped_formula", 0),
+                    "skipped_no_text": paragraph_stats.get("skipped_no_text", 0),
+                },
+                "table_cells": {
+                    "total": table_stats.get("total", 0),
+                    "translated": table_stats.get("translated", 0),
+                    "skipped_empty": table_stats.get("skipped_empty", 0),
+                    "skipped_no_text": table_stats.get("skipped_no_text", 0),
+                },
+                "actual_time_seconds": actual_time,
+            },
+            
+            "comparison": {
+                "token_accuracy": {
+                    "estimated": estimated_tokens,
+                    "actual": actual_tokens,
+                    "diff_percent": token_diff_percent,
+                    "accuracy_level": "high" if abs(token_diff_percent) < 20 else "medium" if abs(token_diff_percent) < 50 else "low"
+                },
+                "time_accuracy": {
+                    "estimated_seconds": estimated_time,
+                    "actual_seconds": actual_time,
+                    "diff_seconds": time_diff_seconds,
+                    "accuracy_level": "high" if abs(time_diff_seconds) < 60 else "medium" if abs(time_diff_seconds) < 300 else "low"
+                }
+            },
+            
+            "performance_metrics": {
+                "analysis_duration_seconds": time_stats.get("total_time", 0) - actual_time,
+                "translation_duration_seconds": actual_time,
+                "tokens_per_second": actual_tokens / actual_time if actual_time > 0 else 0,
+                "paragraphs_per_second": paragraph_stats.get("translated", 0) / actual_time if actual_time > 0 else 0,
+            },
+            
+            "quality_indicators": {
+                "translation_coverage": {
+                    "paragraph_coverage_percent": (
+                        paragraph_stats.get("translated", 0) / max(paragraph_stats.get("total", 1), 1) * 100
+                    ),
+                    "table_coverage_percent": (
+                        table_stats.get("translated", 0) / max(table_stats.get("total", 1), 1) * 100
+                    ),
+                },
+                "efficiency_score": min(100, max(0, 100 - abs(token_diff_percent) - abs(time_diff_seconds) / 10))
+            }
+        }
+        
+        logger.info(f"[阶段三] 统计报告生成完成，预估准确度: tokens {token_diff_percent:.1f}%, "
+                   f"时间 {time_diff_seconds:.1f}s")
+        
+        return final_report
+        
+    except Exception as e:
+        logger.error(f"[阶段三] 统计报告生成失败: {e}")
+        raise

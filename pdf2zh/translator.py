@@ -673,6 +673,16 @@ class AzureOpenAITranslator(BaseTranslator):
             messages=self.prompt(text, self.prompttext),
         )
         logger.debug(f"pre prompttext: {self.prompt(text, self.prompttext)}")
+        
+        # 更新token统计信息
+        if hasattr(response, 'usage') and response.usage:
+            self.update_token_stats(
+                prompt_tokens=response.usage.prompt_tokens or 0,
+                completion_tokens=response.usage.completion_tokens or 0,
+                total_tokens=response.usage.total_tokens or 0
+            )
+            logger.debug(f"[Token统计] 本次翻译使用: prompt={response.usage.prompt_tokens}, completion={response.usage.completion_tokens}, total={response.usage.total_tokens}")
+        
         return response.choices[0].message.content.strip()
 
 
