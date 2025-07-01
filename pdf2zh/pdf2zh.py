@@ -858,7 +858,7 @@ def translate_file(
     reasoning: bool = False,
     ignore_cache: bool = False,
     debug: bool = False,
-    use_concurrent_table_translation: bool = True,
+    use_concurrent_table_translation: bool = False,
     **kwargs: Any,
 ) -> (Optional[str], Optional[PDFTranslationStatistics]):
     """
