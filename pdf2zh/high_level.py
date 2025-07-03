@@ -613,7 +613,7 @@ def translate_stream_v2(
     prompt: Template = None,
     skip_subset_fonts: bool = False,
     ignore_cache: bool = False,
-    use_concurrent_table_translation: bool = True,
+    use_concurrent_table_translation: bool = False,
     **kwarg: Any,
 ):
     """

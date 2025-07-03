@@ -16,7 +16,8 @@ import requests
 
 # --- 配置 ---
 BASE_URL = "http://127.0.0.1:5000/api/v1/translate"
-PDF_PATH = "files/2006-Blom-4.pdf"
+PDF_PATH = "files/2006-Blom-JTH.pdf"
+# PDF_PATH = "files/2006-Blom-4.pdf"
 RESULT_DIR = "test_results_fastapi"  # 使用新目录以区分
 os.makedirs(RESULT_DIR, exist_ok=True)
 
@@ -173,7 +174,7 @@ def main():
     if not task_id:
         return
 
-    # --- To test task cancellation, uncomment the following lines ---
+    # # --- To test task cancellation, uncomment the following lines ---
     # print("\n--- Testing cancellation in 2 seconds ---")
     # time.sleep(2)
     # cancel_task(task_id)
