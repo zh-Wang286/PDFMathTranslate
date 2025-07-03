@@ -595,3 +595,99 @@ def download_remote_fonts(lang: str):
     logger.info(f"use font: {font_path}")
 
     return font_path
+
+
+def translate_stream_v2(
+    stream: bytes,
+    pages: Optional[list[int]] = None,
+    lang_in: str = "",
+    lang_out: str = "",
+    service: str = "",
+    thread: int = 0,
+    vfont: str = "",
+    vchar: str = "",
+    callback: object = None,
+    cancellation_event: asyncio.Event = None,
+    model: OnnxModel = None,
+    envs: Dict = None,
+    prompt: Template = None,
+    skip_subset_fonts: bool = False,
+    ignore_cache: bool = False,
+    use_concurrent_table_translation: bool = True,
+    **kwarg: Any,
+):
+    """
+    A new version of translate_stream for the v2 backend.
+
+    This function is largely identical to translate_stream but is created to
+    decouple new backend development from the existing CLI and other toolchains.
+    It translates a PDF file provided as a byte stream and returns the
+    translated versions along with statistics.
+    """
+    font_list = [("tiro", None)]
+
+    font_path = download_remote_fonts(lang_out.lower())
+    noto_name = NOTO_NAME
+    noto = Font(noto_name, font_path)
+    font_list.append((noto_name, font_path))
+
+    doc_en = Document(stream=stream)
+    stream = io.BytesIO()
+    doc_en.save(stream)
+    doc_zh = Document(stream=stream)
+    page_count = doc_zh.page_count
+    # font_list = [("GoNotoKurrent-Regular.ttf", font_path), ("tiro", None)]
+    font_id = {}
+    for page in doc_zh:
+        for font in font_list:
+            font_id[font[0]] = page.insert_font(font[0], font[1])
+    xreflen = doc_zh.xref_length()
+    for xref in range(1, xreflen):
+        for label in ["Resources/", ""]:  # 可能是基于 xobj 的 res
+            try:  # xref 读写可能出错
+                font_res = doc_zh.xref_get_key(xref, f"{label}Font")
+                target_key_prefix = f"{label}Font/"
+                if font_res[0] == "xref":
+                    resource_xref_id = re.search("(\\d+) 0 R", font_res[1]).group(1)
+                    xref = int(resource_xref_id)
+                    font_res = ("dict", doc_zh.xref_object(xref))
+                    target_key_prefix = ""
+
+                if font_res[0] == "dict":
+                    for font in font_list:
+                        target_key = f"{target_key_prefix}{font[0]}"
+                        font_exist = doc_zh.xref_get_key(xref, target_key)
+                        if font_exist[0] == "null":
+                            doc_zh.xref_set_key(
+                                xref,
+                                target_key,
+                                f"{font_id[font[0]]} 0 R",
+                            )
+            except Exception:
+                pass
+
+    fp = io.BytesIO()
+
+    doc_zh.save(fp)
+    obj_patch, token_stats, paragraph_stats, table_stats = translate_patch(fp, **locals())
+
+    for obj_id, ops_new in obj_patch.items():
+        # ops_old=doc_en.xref_stream(obj_id)
+        # print(obj_id)
+        # print(ops_old)
+        # print(ops_new.encode())
+        doc_zh.update_stream(obj_id, ops_new.encode())
+
+    doc_en.insert_file(doc_zh)
+    for id in range(page_count):
+        doc_en.move_page(page_count + id, id * 2 + 1)
+    if not skip_subset_fonts:
+        doc_zh.subset_fonts(fallback=True)
+        doc_en.subset_fonts(fallback=True)
+    return (
+        doc_zh.write(deflate=True, garbage=3, use_objstms=1),
+        doc_en.write(deflate=True, garbage=3, use_objstms=1),
+        token_stats,
+        paragraph_stats,
+        table_stats,
+    )
