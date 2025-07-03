@@ -11,9 +11,37 @@ RESULT_DIR = "test_results"
 os.makedirs(RESULT_DIR, exist_ok=True)
 
 
-def estimate_translation():
-    """调用预估接口。"""
-    print("--- 步骤 1: 开始时间预估 ---")
+def poll_status(task_id: str, endpoint_url: str):
+    """通用任务轮询函数。"""
+    print(f"\n--- 正在轮询任务 {task_id} ---")
+    while True:
+        try:
+            response = requests.get(f"{endpoint_url}/{task_id}", timeout=5)
+            response.raise_for_status()
+            status_info = response.json()
+            status = status_info.get("status")
+            print(f"当前状态: {status}")
+
+            if status == "PROGRESS":
+                progress = status_info.get("progress", {})
+                print(f"  -> {progress.get('message', '处理中...')}")
+            elif status == "SUCCESS":
+                print("任务成功完成!")
+                return status_info  # 返回整个状态对象
+            elif status in ["FAILURE", "REVOKED"]:
+                print(f"任务终止，状态: {status}")
+                print("错误信息:", status_info.get("error", "无"))
+                return None
+
+            time.sleep(3)  # 每3秒查询一次
+        except requests.exceptions.RequestException as e:
+            print(f"轮询失败: {e}")
+            return None
+
+
+def estimate_translation_async():
+    """调用异步预估接口。"""
+    print("--- 步骤 1: 开始异步时间预估 ---")
     if not os.path.exists(PDF_PATH):
         print(f"错误: 文件未找到 {PDF_PATH}")
         return None
@@ -21,14 +49,27 @@ def estimate_translation():
     with open(PDF_PATH, "rb") as f:
         files = {"file": (os.path.basename(PDF_PATH), f, "application/pdf")}
         try:
-            response = requests.post(f"{BASE_URL}/estimate", files=files, timeout=60)
+            # 创建预估任务
+            response = requests.post(f"{BASE_URL}/estimate", files=files, timeout=10)
             response.raise_for_status()
-            data = response.json()
-            print("预估成功:")
-            print(json.dumps(data, indent=2, ensure_ascii=False))
-            return data
+            task_info = response.json()
+            task_id = task_info.get("task_id")
+            print("预估任务创建成功:")
+            print(json.dumps(task_info, indent=2))
+
+            # 轮询预估结果
+            estimation_info = poll_status(task_id, f"{BASE_URL}/estimate")
+            if estimation_info:
+                result = estimation_info.get("result", {})
+                print("\n预估成功:")
+                print(json.dumps(result, indent=2, ensure_ascii=False))
+                return result
+            else:
+                print("\n预估失败或被终止。")
+                return None
+
         except requests.exceptions.RequestException as e:
-            print(f"预估失败: {e}")
+            print(f"创建预估任务失败: {e}")
             if e.response:
                 print("服务器返回:", e.response.text)
             return None
@@ -67,34 +108,6 @@ def start_translation_task():
             return None
 
 
-def poll_task_status(task_id: str):
-    """轮询任务状态直到完成。"""
-    print(f"\n--- 步骤 3: 轮询任务 {task_id} 状态 ---")
-    while True:
-        try:
-            response = requests.get(f"{BASE_URL}/task/{task_id}", timeout=5)
-            response.raise_for_status()
-            status_info = response.json()
-            status = status_info.get("status")
-            print(f"当前状态: {status}")
-
-            if status == "PROGRESS":
-                progress = status_info.get("progress", {})
-                print(f"  -> {progress.get('message', '处理中...')}")
-            elif status == "SUCCESS":
-                print("任务成功完成!")
-                return status_info
-            elif status in ["FAILURE", "REVOKED"]:
-                print(f"任务终止，状态: {status}")
-                print("错误信息:", status_info.get("error", "无"))
-                return None
-
-            time.sleep(5)  # 每5秒查询一次
-        except requests.exceptions.RequestException as e:
-            print(f"查询状态失败: {e}")
-            return None
-
-
 def download_result_file(task_id: str, format: str = "dual"):
     """下载翻译结果。"""
     print(f"\n--- 步骤 4: 下载结果文件 (格式: {format}) ---")
@@ -129,10 +142,13 @@ def cancel_task(task_id: str):
 
 def main():
     """主测试流程。"""
-    # 1. 预估
-    estimate_translation()
+    # 1. 异步预估
+    estimation_data = estimate_translation_async()
+    if not estimation_data:
+        print("\n因预估失败，流程中止。")
+        return
 
-    # 2. 创建任务
+    # 2. 创建翻译任务
     task_id = start_translation_task()
     if not task_id:
         return
@@ -141,11 +157,11 @@ def main():
     # time.sleep(2) # 等待任务开始处理
     # cancel_task(task_id)
 
-    # 3. 轮询状态
-    final_status = poll_task_status(task_id)
+    # 3. 轮询翻译状态
+    final_status_info = poll_status(task_id, f"{BASE_URL}/task")
 
-    # 4. 下载
-    if final_status and final_status.get("status") == "SUCCESS":
+    # 4. 下载结果
+    if final_status_info and final_status_info.get("status") == "SUCCESS":
         download_result_file(task_id, "dual")
         download_result_file(task_id, "mono")
     else:

@@ -74,6 +74,27 @@ with app.app_context():
 # Celery 异步任务定义
 # ==============================================================================
 @celery_app.task(bind=True)
+def estimate_task_v2(self: Task, file_content: bytes) -> dict[str, Any]:
+    """Celery task for asynchronous PDF estimation."""
+    try:
+        # Since analysis is a single step, we don't report granular progress,
+        # but we could update state to 'STARTED' if needed.
+        analysis_results = analyze_pdf(file_content, model=onnx_model)
+        stats = PDFTranslationStatistics()
+        stats.set_pre_analysis_data(analysis_results)
+        stats.estimate_translation_time()
+        estimation_summary = stats.get_estimation_summary()
+        return {
+            "estimated_time_seconds": estimation_summary["time_estimation"]["estimated_seconds"],
+            "total_tokens": estimation_summary["token_estimation"]["total_tokens"],
+            "total_pages": estimation_summary["content_stats"]["pages"],
+        }
+    except Exception as e:
+        logger.error(f"Estimation Task {self.request.id} failed: {e}", exc_info=True)
+        raise
+
+
+@celery_app.task(bind=True)
 def translate_task_v2(self: Task, file_content: bytes, translation_args: dict[str, Any]) -> dict[str, Any]:
     """
     Celery task for asynchronous PDF translation.
@@ -118,8 +139,8 @@ def translate_task_v2(self: Task, file_content: bytes, translation_args: dict[st
 # API Endpoints (Flask Routes)
 # ==============================================================================
 @app.route("/api/v1/translate/estimate", methods=["POST"])
-def estimate_translation_time():
-    """预估翻译时间接口。"""
+def create_estimate_task():
+    """Creates an asynchronous estimation task."""
     if "file" not in request.files:
         return jsonify({"error": "No file part"}), 400
     file = request.files["file"]
@@ -128,23 +149,26 @@ def estimate_translation_time():
     if file:
         file_content = file.read()
         try:
-            # 正确处理 analyze_pdf 的返回值
-            analysis_results = analyze_pdf(file_content, model=onnx_model)
-            stats = PDFTranslationStatistics()
-            stats.set_pre_analysis_data(analysis_results)
-            
-            # 使用统计对象获取估算值
-            estimation_summary = stats.get_estimation_summary()
-            
-            return jsonify({
-                "estimated_time_seconds": estimation_summary["time_estimation"]["estimated_seconds"],
-                "total_tokens": estimation_summary["token_estimation"]["total_tokens"],
-                "total_pages": estimation_summary["content_stats"]["pages"],
-            })
+            task = estimate_task_v2.apply_async(args=[file_content])
+            return jsonify({"task_id": task.id}), 202
         except Exception as e:
-            logger.error(f"Estimation failed: {e}", exc_info=True)
-            return jsonify({"error": f"Failed to analyze PDF: {e}"}), 500
+            logger.error(f"Estimation task creation failed: {e}", exc_info=True)
+            return jsonify({"error": f"Failed to create estimation task: {e}"}), 500
     return jsonify({"error": "Invalid file"}), 400
+
+
+@app.route("/api/v1/translate/estimate/<string:task_id>", methods=["GET"])
+def get_estimate_status(task_id: str):
+    """Fetches the status and result of an estimation task."""
+    task = AsyncResult(task_id, app=celery_app)
+    response = {"task_id": task_id, "status": task.state}
+    if task.state == "PROGRESS":
+        response["progress"] = task.info
+    elif task.state == "SUCCESS":
+        response["result"] = task.result
+    elif task.state == "FAILURE":
+        response["error"] = str(task.info)
+    return jsonify(response)
 
 
 @app.route("/api/v1/translate/task", methods=["POST"])
