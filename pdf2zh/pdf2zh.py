@@ -858,11 +858,7 @@ def translate_file(
     reasoning: bool = False,
     ignore_cache: bool = False,
     debug: bool = False,
-    use_concurrent_table_translation: bool = True,
-    compatible: bool = False,
-    skip_subset_fonts: bool = False,
-    prompt: Optional[str] = None,
-    babeldoc: bool = False,
+    use_concurrent_table_translation: bool = False,
     **kwargs: Any,
 ) -> (Optional[str], Optional[PDFTranslationStatistics]):
     """
