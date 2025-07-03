@@ -858,7 +858,7 @@ def translate_file(
     reasoning: bool = False,
     ignore_cache: bool = False,
     debug: bool = False,
-    use_concurrent_table_translation: bool = False,
+    use_concurrent_table_translation: bool = True,
     **kwargs: Any,
 ) -> (Optional[str], Optional[PDFTranslationStatistics]):
     """
@@ -896,17 +896,27 @@ def translate_file(
         - The path to the translated PDF file (str) or None if translation failed or was skipped.
         - A PDFTranslationStatistics object with the analysis and runtime data, or None if stats were not requested.
     """
+    prompt_path = kwargs.pop("prompt", None)
+    babeldoc = kwargs.pop("babeldoc", False)
+    compatible = kwargs.pop("compatible", False)
+    skip_subset_fonts = kwargs.pop("skip_subset_fonts", False)
+
     # --- Set up logging ---
     if debug:
         logger.setLevel(logging.DEBUG)
 
     # --- Handle Prompt Template ---
-    if prompt:
+    prompt = None
+    if prompt_path:
         try:
-            with open(prompt, "r", encoding="utf-8") as file:
+            with open(prompt_path, "r", encoding="utf-8") as file:
                 prompt = Template(file.read())
         except Exception:
             raise ValueError("Failed to read prompt template.")
+    else:
+        # 使用默认的 TEMPLATE_PROMPT
+        from pdf2zh.translator import TEMPLATE_PROMPT
+        prompt = Template(TEMPLATE_PROMPT)
 
     # --- Handle Backend Selection ---
     if babeldoc:
@@ -941,9 +951,11 @@ def translate_file(
         
         try:
             translated_file_path = asyncio.run(yadt_translate_coro(yadt_config))
+            stats_obj = None # stats_obj is not available in this path
             return translated_file_path, stats_obj
         except Exception as e:
             logger.error(f"BabelDoc translation failed: {e}")
+            stats_obj = None # stats_obj is not available in this path
             return None, stats_obj
 
     # --- Model Initialization ---

@@ -15,7 +15,7 @@ from rich.console import Console
 from rich.table import Table as RichTable
 
 # --- Configuration ---
-DEBUG_MODE = False
+DEBUG_MODE = True
 
 # --- Logging Setup ---
 log_level = logging.DEBUG if DEBUG_MODE else logging.INFO
@@ -28,36 +28,41 @@ logging.basicConfig(
 logging.getLogger("pdf2zh").setLevel(log_level)
 
 # --- Translation Task Config ---
-input_pdf = "/data1/PDFMathTranslate/files/2006-Blom-4.pdf"
-output_directory = "/data1/PDFMathTranslate/translated_files"
-base_filename = os.path.splitext(os.path.basename(input_pdf))[0]
+input_pdf = "/data01/PDFMathTranslate/files/2006-Blom-4.pdf"
+output_directory = "/data01/PDFMathTranslate/translated_files"
+# base_filename = os.path.splitext(os.path.basename(input_pdf))[0]
 
 # --- Simplified Test Runner ---
 def run_translation():
     """Runs the translation task and returns the elapsed time."""
     print("\n--- Starting Test: Table Translation ---")
     
-    output_filename = f"{base_filename}.pdf"
-    output_path = os.path.join(output_directory, output_filename)
-    
     start_time = time.time()
     
     try:
-        translate_file(
+        translated_file_path, _ = translate_file(
             input_file=input_pdf,
-            output_dir=output_path,
-            service="xinference:qwen3",
-            thread=4,
+            output_dir=output_directory,
+            service="azure-openai",
+            thread=100,
             debug=DEBUG_MODE,
             ignore_cache=True,
+            use_concurrent_table_translation=True,
+            generate_analysis_report=True,
+            lang_in="en",  # 明确指定源语言
+            lang_out="zh",  # 明确指定目标语言
         )
         end_time = time.time()
         elapsed_time = end_time - start_time
         
-        print("✓ Translation finished!")
-        print(f"  - File saved to: {output_path}")
-        print(f"  - Total time: {elapsed_time:.2f} seconds")
-        return elapsed_time
+        if translated_file_path:
+            print("✓ Translation finished!")
+            print(f"  - File saved to: {translated_file_path}")
+            print(f"  - Total time: {elapsed_time:.2f} seconds")
+            return elapsed_time
+        else:
+            logging.error("❌ Translation failed, no output file was created.")
+            return -1
     except Exception as e:
         logging.error("❌ Translation failed.", exc_info=True)
         return -1
