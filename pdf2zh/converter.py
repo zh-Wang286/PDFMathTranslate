@@ -558,7 +558,7 @@ class TranslateConverter(PDFConverterEx):
         envs: Dict = None,
         prompt: Template = None,
         ignore_cache: bool = False,
-        use_concurrent_table_translation: bool = True,
+        use_concurrent_table_translation: bool = False,
     ) -> None:
         super().__init__(rsrcmgr)
         self.vfont = vfont
@@ -597,6 +597,7 @@ class TranslateConverter(PDFConverterEx):
             "skipped_empty": 0,     # 跳过的空白单元格数
             "skipped_no_text": 0,   # 跳过的无中英文单元格数
             "translated": 0,         # 实际翻译的单元格数
+            "skipped_failed": 0,    # 翻译失败的单元格数
         }
         
         # 初始化并发表格翻译器
@@ -1184,7 +1185,6 @@ class SerialTableTranslator:
         """
         cells = table_region.cells
         logger.info(f"开始串行翻译表格 {table_region.table_id} 的 {len(cells)} 个单元格")
-        table_stats["total_cells"] += len(cells)
 
         for cell in cells:
             cell_text = cell.text.strip()
@@ -1200,6 +1200,7 @@ class SerialTableTranslator:
                     table_stats["translated"] += 1
                 except Exception as e:
                     logger.warning(f"Failed to translate table cell '{cell_text}': {e}")
+                    table_stats["skipped_failed"] += 1
                     cell.translated_text = cell_text
             else:
                 table_stats["skipped_no_text"] += 1
@@ -1245,7 +1246,6 @@ class ConcurrentTableTranslator:
             return table_region
             
         logger.info(f"开始并发翻译表格 {table_region.table_id}，共 {len(cells)} 个单元格")
-        table_stats["total_cells"] += len(cells)
         
         # 1. 预处理：分析表格结构和空间约束，并准备翻译任务
         tasks = []
@@ -1405,6 +1405,8 @@ class ConcurrentTableTranslator:
                 return task
             except Exception as e:
                 logger.warning(f"单元格 {task.cell_idx} 翻译失败: '{task.text}' -> {e}")
+                with self._lock:
+                    table_stats["skipped_failed"] += 1
                 task.cell.translated_text = task.text
                 return task
         

@@ -112,7 +112,7 @@ def translate_patch(
     envs: Dict = None,
     prompt: Template = None,
     ignore_cache: bool = False,
-    use_concurrent_table_translation: bool = True,
+    use_concurrent_table_translation: bool = False,
     **kwarg: Any,
 ) -> dict:
     rsrcmgr = PDFResourceManager()
@@ -261,7 +261,7 @@ def translate_stream(
     prompt: Template = None,
     skip_subset_fonts: bool = False,
     ignore_cache: bool = False,
-    use_concurrent_table_translation: bool = True,
+    use_concurrent_table_translation: bool = False,
     **kwarg: Any,
 ):
     font_list = [("tiro", None)]

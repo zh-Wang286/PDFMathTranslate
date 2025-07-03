@@ -74,6 +74,7 @@ class PDFTranslationStatistics:
             "table_cell_translated": 0,
             "table_cell_skipped_empty": 0,
             "table_cell_skipped_no_text": 0,
+            "table_cell_skipped_failed": 0,
         }
 
         # 是否为推理模式
@@ -226,6 +227,7 @@ class PDFTranslationStatistics:
             "table_cell_translated": table_stats.get("translated", 0),
             "table_cell_skipped_empty": table_stats.get("skipped_empty", 0),
             "table_cell_skipped_no_text": table_stats.get("skipped_no_text", 0),
+            "table_cell_skipped_failed": table_stats.get("skipped_failed", 0),
         })
         logger.debug(f"Table stats updated: {table_stats}")
 
@@ -288,6 +290,7 @@ class PDFTranslationStatistics:
                     "translated": self.runtime_stats["table_cell_translated"],
                     "skipped_empty": self.runtime_stats["table_cell_skipped_empty"],
                     "skipped_no_text": self.runtime_stats["table_cell_skipped_no_text"],
+                    "skipped_failed": self.runtime_stats["table_cell_skipped_failed"],
                 }
             }
         }
@@ -459,6 +462,8 @@ class PDFTranslationStatistics:
                 file_handle.write(f"  已翻译: {self.runtime_stats['table_cell_translated']}\n")
                 file_handle.write(f"  跳过空白: {self.runtime_stats['table_cell_skipped_empty']}\n")
                 file_handle.write(f"  跳过无中英文: {self.runtime_stats['table_cell_skipped_no_text']}\n")
+                if self.runtime_stats['table_cell_skipped_failed'] > 0:
+                    file_handle.write(f"  翻译失败: {self.runtime_stats['table_cell_skipped_failed']}\n")
             file_handle.write("\n")
 
         # 写入结尾
@@ -592,8 +597,11 @@ def collect_runtime_stats(
     # 表格统计
     if runtime_summary['translation_stats']['table_cells']['total'] > 0:
         cells = runtime_summary['translation_stats']['table_cells']
-        logger.info(f"表格单元格翻译: {cells['translated']}/{cells['total']} " +
-                   f"(跳过: 空白{cells['skipped_empty']}, 无中英文{cells['skipped_no_text']})")
+        skipped_info = f"(跳过: 空白{cells['skipped_empty']}, 无中英文{cells['skipped_no_text']}"
+        if cells['skipped_failed'] > 0:
+            skipped_info += f", 失败{cells['skipped_failed']}"
+        skipped_info += ")"
+        logger.info(f"表格单元格翻译: {cells['translated']}/{cells['total']} {skipped_info}")
 
     logger.info("=" * 59)
 
