@@ -1,0 +1,17 @@
+# FastAPI后端服务依赖
+# 核心框架
+fastapi==0.114.12
+uvicorn[standard]==0.24.0
+
+# 异步任务处理
+celery==5.3.4
+redis==5.0.1
+
+# 数据验证和序列化
+pydantic==2.5.0
+
+# 文件处理
+python-multipart==0.0.6
+
+# 其他工具
+tqdm==4.66.1 

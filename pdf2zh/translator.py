@@ -163,6 +163,7 @@ class BaseTranslator:
         """
         Translate the text, and the other part should call this method.
         :param text: text to translate
+        :param ignore_cache: whether to ignore cache and force re-translation
         :return: translated text
         """
         if not (self.ignore_cache or ignore_cache):
@@ -171,7 +172,11 @@ class BaseTranslator:
                 return cache
 
         translation = self.do_translate(text)
-        self.cache.set(text, translation)
+        
+        # 只有在不忽略缓存时才缓存结果
+        if not (self.ignore_cache or ignore_cache):
+            self.cache.set(text, translation)
+            
         return translation
 
     def do_translate(self, text: str) -> str:
