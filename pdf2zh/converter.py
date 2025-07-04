@@ -331,7 +331,7 @@ class AnalysisConverter(PDFConverterEx):
         cancellation_event: Optional[asyncio.Event] = None,
     ) -> dict:
         """
-        Analyzes a PDF file to gather statistics about its content.
+        Analyzes a PDF file to gather statistics about its content, using parallel processing for layout analysis.
 
         Args:
             pdf_bytes: The PDF content as bytes.
@@ -341,77 +341,89 @@ class AnalysisConverter(PDFConverterEx):
         Returns:
             A dictionary containing the analysis results.
         """
-        # Create two independent streams from the same bytes to avoid conflicts
         inf_for_pdfminer = io.BytesIO(pdf_bytes)
         inf_for_pymupdf = io.BytesIO(pdf_bytes)
 
         interpreter = PDFPageInterpreterEx(self.rsrcmgr, self, {})
-
         parser = PDFParser(inf_for_pdfminer)
         doc = PDFDocument(parser)
         doc_for_render = Document(stream=inf_for_pymupdf)
 
         pages_to_process = self.pages_to_process
-        if not pages_to_process:  # if it's initialized to [], so if it's empty, use all pages
+        if not pages_to_process:
             pages_to_process = list(range(doc_for_render.page_count))
 
-        with tqdm.tqdm(total=len(pages_to_process), desc="Analyzing PDF") as progress:
-            for pageno, page in enumerate(PDFPage.create_pages(doc)):
-                page.pageno = pageno
+        # --- Phase 1: Parallel Layout Analysis ---
+        def _analyze_page_layout(pageno):
+            if cancellation_event and cancellation_event.is_set():
+                return None
 
-                if pageno not in pages_to_process:
-                    continue
+            pix = doc_for_render[pageno].get_pixmap()
+            image = np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.width, 3)[:, :, ::-1]
+            page_layout = model.predict(image, imgsz=int(pix.height / 32) * 32)[0]
+            box = np.ones((pix.height, pix.width))
+            h, w = box.shape
+            vcls = ["abandon", "figure", "isolate_formula", "formula_caption"]
+            table_regions = []
 
-                if cancellation_event and cancellation_event.is_set():
-                    raise CancelledError("Analysis task cancelled")
+            for i, d in enumerate(page_layout.boxes):
+                box_class = page_layout.names[int(d.cls)]
+                x0, y0, x1, y1 = d.xyxy.squeeze()
+                b_x0, b_y0, b_x1, b_y1 = (
+                    np.clip(int(x0 - 1), 0, w - 1),
+                    np.clip(int(h - y1 - 1), 0, h - 1),
+                    np.clip(int(x1 + 1), 0, w - 1),
+                    np.clip(int(h - y0 + 1), 0, h - 1),
+                )
 
-                # Following the robust pattern from translate_patch:
-                # The 'page_xref' attribute is also required by the interpreter.
-                page.page_xref = doc_for_render.get_new_xref()
-
-                # --- Layout analysis (from translate_patch) ---
-                pix = doc_for_render[pageno].get_pixmap()
-                image = np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.width, 3)[:, :, ::-1]
-                page_layout = model.predict(image, imgsz=int(pix.height / 32) * 32)[0]
-                box = np.ones((pix.height, pix.width))
-                h, w = box.shape
-                vcls = ["abandon", "figure", "isolate_formula", "formula_caption"]
-                table_regions = []
-
-                for i, d in enumerate(page_layout.boxes):
-                    box_class = page_layout.names[int(d.cls)]
+                if box_class == "table":
+                    table_id = -(i + 100)
+                    box[b_y0:b_y1, b_x0:b_x1] = table_id
+                    table_regions.append({'id': table_id, 'bbox': (b_x0, b_y0, b_x1, b_y1)})
+                elif box_class not in vcls:
+                    box[b_y0:b_y1, b_x0:b_x1] = i + 2
+            
+            for i, d in enumerate(page_layout.boxes):
+                if page_layout.names[int(d.cls)] in vcls:
                     x0, y0, x1, y1 = d.xyxy.squeeze()
-                    b_x0, b_y0, b_x1, b_y1 = (
+                    x0, y0, x1, y1 = (
                         np.clip(int(x0 - 1), 0, w - 1),
                         np.clip(int(h - y1 - 1), 0, h - 1),
                         np.clip(int(x1 + 1), 0, w - 1),
                         np.clip(int(h - y0 + 1), 0, h - 1),
                     )
+                    box[y0:y1, x0:x1] = 0
 
-                    if box_class == "table":
-                        table_id = -(i + 100)
-                        box[b_y0:b_y1, b_x0:b_x1] = table_id
-                        table_regions.append({'id': table_id, 'bbox': (b_x0, b_y0, b_x1, b_y1)})
-                    elif box_class not in vcls:
-                        box[b_y0:b_y1, b_x0:b_x1] = i + 2
+            return pageno, box, table_regions
 
-                if 'table_regions' not in self.layout:
-                    self.layout['table_regions'] = {}
-                self.layout['table_regions'][pageno] = table_regions
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            with tqdm.tqdm(total=len(pages_to_process), desc="Phase 1: Analyzing Layout (Parallel)") as progress:
+                futures = {executor.submit(_analyze_page_layout, pageno) for pageno in pages_to_process}
+                for future in concurrent.futures.as_completed(futures):
+                    if cancellation_event and cancellation_event.is_set():
+                        raise CancelledError("Analysis task cancelled")
+                    
+                    result = future.result()
+                    if result:
+                        pageno, box, table_regions = result
+                        self.layout[pageno] = box
+                        if 'table_regions' not in self.layout:
+                            self.layout['table_regions'] = {}
+                        self.layout['table_regions'][pageno] = table_regions
+                    progress.update()
 
-                for i, d in enumerate(page_layout.boxes):
-                    if page_layout.names[int(d.cls)] in vcls:
-                        x0, y0, x1, y1 = d.xyxy.squeeze()
-                        x0, y0, x1, y1 = (
-                            np.clip(int(x0 - 1), 0, w - 1),
-                            np.clip(int(h - y1 - 1), 0, h - 1),
-                            np.clip(int(x1 + 1), 0, w - 1),
-                            np.clip(int(h - y0 + 1), 0, h - 1),
-                        )
-                        box[y0:y1, x0:x1] = 0
-
-                self.layout[pageno] = box
-                # --- End Layout analysis ---
+        if cancellation_event and cancellation_event.is_set():
+            raise CancelledError("Analysis task cancelled")
+            
+        # --- Phase 2: Serial Content Interpretation ---
+        with tqdm.tqdm(total=len(pages_to_process), desc="Phase 2: Interpreting Content (Serial)") as progress:
+            for pageno, page in enumerate(PDFPage.create_pages(doc)):
+                page.pageno = pageno
+                if pageno not in pages_to_process:
+                    continue
+                
+                # The 'page_xref' attribute is required by the interpreter.
+                page.page_xref = doc_for_render.get_new_xref()
 
                 interpreter.process_page(page)
                 progress.update()
