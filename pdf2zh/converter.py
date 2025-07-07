@@ -427,22 +427,11 @@ class AnalysisConverter(PDFConverterEx):
         if not pages_to_process:
             pages_to_process = list(range(doc_for_render.page_count))
 
-        # 根据PDF页数动态调整并发数
-        page_count = doc_for_render.page_count
+        # For CPU-bound tasks like layout analysis, the number of workers should
+        # be close to the number of CPU cores. The previous logic for doubling
+        # workers was causing thread oversubscription and was detrimental to performance.
+        # The default `self.max_workers` (which defaults to the CPU count) is a sensible choice.
         effective_max_workers = self.max_workers
-        if 20 <= page_count <= 200:
-            cpu_count = os.cpu_count() or 1
-            doubled_workers = self.max_workers * 2
-            logger.info(
-                f"PDF页数 ({page_count}) 在20-200页之间，"
-                f"并发数从 {self.max_workers} 翻倍至 {doubled_workers}."
-            )
-            if doubled_workers > cpu_count:
-                logger.warning(
-                    f"新的并发数 ({doubled_workers}) 已超过CPU核心数 ({cpu_count})，"
-                    "对于CPU密集型任务，这可能不会提升性能。"
-                )
-            effective_max_workers = doubled_workers
 
         # --- Phase 1: Parallel Layout Analysis ---
         def _analyze_page_layout(pageno):

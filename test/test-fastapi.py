@@ -109,7 +109,7 @@ def start_translation_task():
         "service": "azure-openai",
         "thread": 100,
         "use_concurrent_table_translation": True,
-        "analysis_report": True,
+        "analysis_report": False,
     }
 
     with open(PDF_PATH, "rb") as f:

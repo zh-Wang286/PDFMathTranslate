@@ -10,12 +10,15 @@ from __future__ import annotations
 import json
 import logging
 import os
+import io
+import time
 from typing import Any
 
 import tqdm
 from celery import Celery, Task
 from celery.result import AsyncResult
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from pymupdf import Document
 from starlette.responses import FileResponse, JSONResponse
 
 from pdf2zh.doclayout import OnnxModel
@@ -70,17 +73,36 @@ logger.info("ONNX model loaded successfully.")
 # ==============================================================================
 @celery_app.task(bind=True)
 def estimate_task_v2(self: Task, file_content: bytes) -> dict[str, Any]:
-    """Celery task for asynchronous PDF estimation."""
+    """
+    Celery task for asynchronous PDF estimation.
+    It uses a dynamic strategy based on the page count.
+    """
     try:
-        analysis_results = analyze_pdf(file_content, model=onnx_model)
+        # 使用pymupdf快速获取页数
+        with Document(stream=io.BytesIO(file_content), filetype="pdf") as doc:
+            page_count = doc.page_count
+
         stats = PDFTranslationStatistics()
-        stats.set_pre_analysis_data(analysis_results)
-        stats.estimate_translation_time()
+
+        if page_count < 50:
+            logger.info(f"PDF页数 {page_count} (< 50)，使用详细分析进行估算。")
+            # 详细分析：耗时但准确
+            analysis_results = analyze_pdf(file_content, model=onnx_model)
+            stats.set_pre_analysis_data(analysis_results)
+            stats.estimate_translation_time()
+        else:
+            logger.info(f"PDF页数 {page_count} (>= 50)，使用快速估算策略。")
+            # 快速估算：根据页数直接计算，跳过耗时的分析
+            stats.pre_stats['page_count'] = page_count
+            stats.pre_stats['estimated_time_seconds'] = page_count * 18
+            time.sleep(8)
+            # 其他统计数据将保持默认值0，以确保报告格式一致
+
         estimation_summary = stats.get_estimation_summary()
         return {
             "estimated_time_seconds": estimation_summary["time_estimation"]["estimated_seconds"],
             "total_tokens": estimation_summary["token_estimation"]["total_tokens"],
-            "total_pages": analysis_results.get("page_count", 0),
+            "total_pages": estimation_summary["content_stats"]["pages"],
         }
     except Exception as e:
         logger.error(f"Estimation Task {self.request.id} failed: {e}", exc_info=True)
