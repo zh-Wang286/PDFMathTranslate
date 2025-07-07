@@ -20,7 +20,7 @@ from starlette.responses import FileResponse, JSONResponse
 
 from pdf2zh.doclayout import OnnxModel
 from pdf2zh.high_level import analyze_pdf, translate_stream_v2
-from pdf2zh.statistics import PDFTranslationStatistics
+from pdf2zh.statistics import PDFTranslationStatistics, collect_runtime_stats, perform_pre_analysis
 
 # ==============================================================================
 # 模块级配置和初始化
@@ -80,7 +80,7 @@ def estimate_task_v2(self: Task, file_content: bytes) -> dict[str, Any]:
         return {
             "estimated_time_seconds": estimation_summary["time_estimation"]["estimated_seconds"],
             "total_tokens": estimation_summary["token_estimation"]["total_tokens"],
-            "total_pages": estimation_summary["content_stats"]["pages"],
+            "total_pages": analysis_results.get("page_count", 0),
         }
     except Exception as e:
         logger.error(f"Estimation Task {self.request.id} failed: {e}", exc_info=True)
@@ -95,6 +95,24 @@ def translate_task_v2(self: Task, file_content: bytes, translation_args: dict[st
     try:
         self.update_state(state="PROGRESS", meta={"message": "Translation started..."})
 
+        stats_obj = None
+        # 如果需要生成分析报告
+        if translation_args.get("analysis_report"):
+            # 1. 执行预分析
+            stats_obj = perform_pre_analysis(
+                pdf_bytes=file_content,
+                model=onnx_model,
+                is_reasoning=False  # 根据需要设置
+            )
+            stats_obj.set_runtime_config(
+                service=translation_args.get("service", ""),
+                thread_count=translation_args.get("thread", 0)
+            )
+            stats_obj.set_input_files(["Uploaded PDF"])
+            stats_obj.start_runtime_tracking()
+            # 将统计对象传递给翻译函数
+            translation_args["stats_obj"] = stats_obj
+
         def progress_callback(t: tqdm.tqdm):
             message = f"Translating page {t.n}/{t.total}"
             self.update_state(state="PROGRESS", meta={"message": message})
@@ -105,7 +123,7 @@ def translate_task_v2(self: Task, file_content: bytes, translation_args: dict[st
             callback=progress_callback,
             **translation_args,
         )
-        translated_mono_stream, translated_dual_stream = result_tuple[0], result_tuple[1]
+        translated_mono_stream, translated_dual_stream, token_stats, paragraph_stats, table_stats = result_tuple
 
         # 保存结果文件
         mono_path = os.path.join(TRANSLATED_FILES_DIR, f"{task_id}-mono.pdf")
@@ -116,7 +134,16 @@ def translate_task_v2(self: Task, file_content: bytes, translation_args: dict[st
         with open(dual_path, "wb") as f:
             f.write(translated_dual_stream)
 
-        return {"status": "SUCCESS", "mono_path": mono_path, "dual_path": dual_path}
+        result = {"status": "SUCCESS", "mono_path": mono_path, "dual_path": dual_path}
+
+        # 如果生成了报告，则保存并返回路径
+        if stats_obj:
+            stats_obj.end_runtime_tracking()
+            collect_runtime_stats(stats_obj, token_stats, paragraph_stats, table_stats)
+            report_path = stats_obj.generate_report_log(TRANSLATED_FILES_DIR)
+            result["analysis_report_path"] = report_path
+
+        return result
     except Exception as e:
         logger.error(f"Task {task_id} failed: {e}", exc_info=True)
         self.update_state(state='FAILURE', meta={'exc_type': type(e).__name__, 'exc_message': str(e)})

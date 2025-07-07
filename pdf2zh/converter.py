@@ -20,6 +20,7 @@ from tenacity import retry, wait_fixed
 
 import asyncio
 import io
+import os
 from asyncio import CancelledError
 
 from pdfminer.pdfdocument import PDFDocument
@@ -58,6 +59,9 @@ from pdf2zh.translator import (
 )
 
 from pdf2zh.utils import count_tokens
+
+import psutil
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -310,19 +314,74 @@ class AnalysisConverter(PDFConverterEx):
     A converter for analyzing PDF layout and content without translation.
     It counts pages, paragraphs, tables, cells, and tokens for both.
     """
-    def __init__(self, rsrcmgr, layout={}, pages_to_process=None) -> None:
+    def __init__(
+        self, 
+        rsrcmgr, 
+        layout={}, 
+        pages_to_process=None,
+        max_workers: Optional[int] = None,
+        onnx_inter_op_threads: Optional[int] = None,
+        onnx_intra_op_threads: Optional[int] = None,
+    ) -> None:
+        """
+        Initialize the AnalysisConverter.
+        
+        Args:
+            rsrcmgr: PDFResourceManager instance
+            layout: Layout information dictionary
+            pages_to_process: List of page numbers to process
+            max_workers: Maximum number of worker threads for parallel processing.
+                        建议值：CPU核心数 (例如8核CPU设置为8)
+            onnx_inter_op_threads: Number of threads for inter-op parallelism in ONNX.
+                                  建议值：CPU核心数的1/4 (例如8核CPU设置为2)
+            onnx_intra_op_threads: Number of threads for intra-op parallelism in ONNX.
+                                  建议值：2 (利用AVX指令集)
+        """
         super().__init__(rsrcmgr)
         self.layout = layout
         self.pages_to_process = pages_to_process if pages_to_process is not None else []
-        self.processed_pages = set()  # 跟踪实际处理的页面
+        self.processed_pages = set()  # 跟踪已处理的页面
+        
+        # 获取CPU核心数
+        cpu_count = os.cpu_count() or 1
+        
+        # 设置线程池大小 - 对于计算密集型任务，设置为CPU核心数
+        self.max_workers = max_workers if max_workers is not None else min(cpu_count, 32)
+        
+        # 设置ONNX线程配置
+        # inter_op_threads: 设置为CPU核心数的1/4，确保主线程池有足够资源
+        # intra_op_threads: 设置为2，充分利用AVX指令集
+        self.onnx_inter_op_threads = onnx_inter_op_threads or max(1, cpu_count // 4)
+        self.onnx_intra_op_threads = onnx_intra_op_threads or 2
+        
+        # 初始化性能监控
         self.stats = {
-            "page_count": 0,  # 将在处理过程中更新
-            "pages": {},
-            "total_paragraph_tokens": 0,
-            "total_table_tokens": 0,
+            "page_count": 0,
             "total_paragraph_count": 0,
+            "total_paragraph_tokens": 0,
             "total_table_cell_count": 0,
+            "total_table_tokens": 0,
+            "pages": {},
+            "performance_metrics": {
+                "cpu_usage": [],
+                "memory_usage": [],
+                "processing_times": [],
+                "thread_config": {
+                    "cpu_cores": cpu_count,
+                    "max_workers": self.max_workers,
+                    "onnx_inter_op_threads": self.onnx_inter_op_threads,
+                    "onnx_intra_op_threads": self.onnx_intra_op_threads
+                }
+            }
         }
+        
+        logger.info(
+            f"Initialized AnalysisConverter with:\n"
+            f"  - CPU cores: {cpu_count}\n"
+            f"  - max_workers: {self.max_workers}\n"
+            f"  - onnx_inter_op_threads: {self.onnx_inter_op_threads}\n"
+            f"  - onnx_intra_op_threads: {self.onnx_intra_op_threads}"
+        )
 
     def analyze_document(
         self,
@@ -341,6 +400,21 @@ class AnalysisConverter(PDFConverterEx):
         Returns:
             A dictionary containing the analysis results.
         """
+        # 配置ONNX会话选项
+        if hasattr(model, 'session') and hasattr(model.session, 'set_providers_options'):
+            providers_options = {}
+            if self.onnx_inter_op_threads is not None:
+                providers_options['inter_op_num_threads'] = self.onnx_inter_op_threads
+            if self.onnx_intra_op_threads is not None:
+                providers_options['intra_op_num_threads'] = self.onnx_intra_op_threads
+            
+            if providers_options:
+                try:
+                    model.session.set_providers_options([providers_options])
+                    logger.info(f"已配置ONNX会话选项: {providers_options}")
+                except Exception as e:
+                    logger.warning(f"配置ONNX会话选项失败: {e}")
+
         inf_for_pdfminer = io.BytesIO(pdf_bytes)
         inf_for_pymupdf = io.BytesIO(pdf_bytes)
 
@@ -353,64 +427,138 @@ class AnalysisConverter(PDFConverterEx):
         if not pages_to_process:
             pages_to_process = list(range(doc_for_render.page_count))
 
+        # 根据PDF页数动态调整并发数
+        page_count = doc_for_render.page_count
+        effective_max_workers = self.max_workers
+        if 20 <= page_count <= 200:
+            cpu_count = os.cpu_count() or 1
+            doubled_workers = self.max_workers * 2
+            logger.info(
+                f"PDF页数 ({page_count}) 在20-200页之间，"
+                f"并发数从 {self.max_workers} 翻倍至 {doubled_workers}."
+            )
+            if doubled_workers > cpu_count:
+                logger.warning(
+                    f"新的并发数 ({doubled_workers}) 已超过CPU核心数 ({cpu_count})，"
+                    "对于CPU密集型任务，这可能不会提升性能。"
+                )
+            effective_max_workers = doubled_workers
+
         # --- Phase 1: Parallel Layout Analysis ---
         def _analyze_page_layout(pageno):
             if cancellation_event and cancellation_event.is_set():
                 return None
 
-            pix = doc_for_render[pageno].get_pixmap()
-            image = np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.width, 3)[:, :, ::-1]
-            page_layout = model.predict(image, imgsz=int(pix.height / 32) * 32)[0]
-            box = np.ones((pix.height, pix.width))
-            h, w = box.shape
-            vcls = ["abandon", "figure", "isolate_formula", "formula_caption"]
-            table_regions = []
+            try:
+                # 记录内存使用情况
+                process = psutil.Process()
+                start_memory = process.memory_info().rss
+                start_time = time.time()
 
-            for i, d in enumerate(page_layout.boxes):
-                box_class = page_layout.names[int(d.cls)]
-                x0, y0, x1, y1 = d.xyxy.squeeze()
-                b_x0, b_y0, b_x1, b_y1 = (
-                    np.clip(int(x0 - 1), 0, w - 1),
-                    np.clip(int(h - y1 - 1), 0, h - 1),
-                    np.clip(int(x1 + 1), 0, w - 1),
-                    np.clip(int(h - y0 + 1), 0, h - 1),
-                )
+                pix = doc_for_render[pageno].get_pixmap()
+                image = np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.width, 3)[:, :, ::-1]
+                page_layout = model.predict(image, imgsz=int(pix.height / 32) * 32)[0]
+                box = np.ones((pix.height, pix.width))
+                h, w = box.shape
+                vcls = ["abandon", "figure", "isolate_formula", "formula_caption"]
+                table_regions = []
 
-                if box_class == "table":
-                    table_id = -(i + 100)
-                    box[b_y0:b_y1, b_x0:b_x1] = table_id
-                    table_regions.append({'id': table_id, 'bbox': (b_x0, b_y0, b_x1, b_y1)})
-                elif box_class not in vcls:
-                    box[b_y0:b_y1, b_x0:b_x1] = i + 2
-            
-            for i, d in enumerate(page_layout.boxes):
-                if page_layout.names[int(d.cls)] in vcls:
+                for i, d in enumerate(page_layout.boxes):
+                    box_class = page_layout.names[int(d.cls)]
                     x0, y0, x1, y1 = d.xyxy.squeeze()
-                    x0, y0, x1, y1 = (
+                    b_x0, b_y0, b_x1, b_y1 = (
                         np.clip(int(x0 - 1), 0, w - 1),
                         np.clip(int(h - y1 - 1), 0, h - 1),
                         np.clip(int(x1 + 1), 0, w - 1),
                         np.clip(int(h - y0 + 1), 0, h - 1),
                     )
-                    box[y0:y1, x0:x1] = 0
 
-            return pageno, box, table_regions
+                    if box_class == "table":
+                        table_id = -(i + 100)
+                        box[b_y0:b_y1, b_x0:b_x1] = table_id
+                        table_regions.append({'id': table_id, 'bbox': (b_x0, b_y0, b_x1, b_y1)})
+                    elif box_class not in vcls:
+                        box[b_y0:b_y1, b_x0:b_x1] = i + 2
+                
+                for i, d in enumerate(page_layout.boxes):
+                    if page_layout.names[int(d.cls)] in vcls:
+                        x0, y0, x1, y1 = d.xyxy.squeeze()
+                        x0, y0, x1, y1 = (
+                            np.clip(int(x0 - 1), 0, w - 1),
+                            np.clip(int(h - y1 - 1), 0, h - 1),
+                            np.clip(int(x1 + 1), 0, w - 1),
+                            np.clip(int(h - y0 + 1), 0, h - 1),
+                        )
+                        box[y0:y1, x0:x1] = 0
 
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            with tqdm.tqdm(total=len(pages_to_process), desc="Phase 1: Analyzing Layout (Parallel)") as progress:
+                # 计算资源使用情况
+                end_time = time.time()
+                end_memory = process.memory_info().rss
+                memory_used = (end_memory - start_memory) / 1024 / 1024  # MB
+                time_used = end_time - start_time
+
+                return {
+                    'pageno': pageno,
+                    'box': box,
+                    'table_regions': table_regions,
+                    'metrics': {
+                        'memory_mb': memory_used,
+                        'time_seconds': time_used,
+                        'thread_id': threading.get_ident()
+                    }
+                }
+
+            except Exception as e:
+                logger.error(f"处理页面 {pageno} 时发生错误: {e}")
+                return None
+
+        # 使用配置的线程池大小
+        with concurrent.futures.ThreadPoolExecutor(max_workers=effective_max_workers) as executor:
+            with tqdm.tqdm(total=len(pages_to_process), desc=f"Phase 1: Analyzing Layout (Parallel, {effective_max_workers} threads)") as progress:
                 futures = {executor.submit(_analyze_page_layout, pageno) for pageno in pages_to_process}
+                
+                # 收集性能指标
+                performance_metrics = {
+                    'total_memory_mb': 0,
+                    'total_time_seconds': 0,
+                    'pages_processed': 0,
+                    'active_threads': set()
+                }
+
                 for future in concurrent.futures.as_completed(futures):
                     if cancellation_event and cancellation_event.is_set():
                         raise CancelledError("Analysis task cancelled")
                     
                     result = future.result()
                     if result:
-                        pageno, box, table_regions = result
+                        pageno = result['pageno']
+                        box = result['box']
+                        table_regions = result['table_regions']
+                        metrics = result['metrics']
+                        
                         self.layout[pageno] = box
                         if 'table_regions' not in self.layout:
                             self.layout['table_regions'] = {}
                         self.layout['table_regions'][pageno] = table_regions
+                        
+                        # 更新性能指标
+                        performance_metrics['total_memory_mb'] += metrics['memory_mb']
+                        performance_metrics['total_time_seconds'] += metrics['time_seconds']
+                        performance_metrics['pages_processed'] += 1
+                        performance_metrics['active_threads'].add(metrics['thread_id'])
+                        
                     progress.update()
+
+                # 计算平均值并更新统计信息
+                if performance_metrics['pages_processed'] > 0:
+                    avg_memory = performance_metrics['total_memory_mb'] / performance_metrics['pages_processed']
+                    avg_time = performance_metrics['total_time_seconds'] / performance_metrics['pages_processed']
+                    self.stats['performance_metrics'].update({
+                        'average_memory_per_page_mb': round(avg_memory, 2),
+                        'average_time_per_page_seconds': round(avg_time, 2),
+                        'total_active_threads': len(performance_metrics['active_threads']),
+                        'total_processing_time': round(performance_metrics['total_time_seconds'], 2)
+                    })
 
         if cancellation_event and cancellation_event.is_set():
             raise CancelledError("Analysis task cancelled")
@@ -432,14 +580,14 @@ class AnalysisConverter(PDFConverterEx):
         return self.stats
 
     def receive_layout(self, ltpage: LTPage):
+        """处理页面布局"""
         # 如果指定了页面范围，且当前页面不在范围内，则跳过
         if self.pages_to_process and ltpage.pageid not in self.pages_to_process:
-            return None
+            return
             
-        # 记录这个页面已被处理
+        # 记录已处理的页面
         self.processed_pages.add(ltpage.pageid)
-        # 更新实际处理的页面数
-        self.stats["page_count"] = len(self.processed_pages)
+        self.stats["page_count"] += 1
             
         page_items = list(ltpage)
         all_chars = [item for item in page_items if isinstance(item, LTChar)]

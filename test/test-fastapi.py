@@ -16,7 +16,7 @@ import requests
 
 # --- 配置 ---
 BASE_URL = "http://127.0.0.1:5000/api/v1/translate"
-PDF_PATH = "files/2006-Blom-JTH.pdf"
+PDF_PATH = "files/KDIGO.pdf"
 # PDF_PATH = "files/2006-Blom-4.pdf"
 RESULT_DIR = "test_results_fastapi"  # 使用新目录以区分
 os.makedirs(RESULT_DIR, exist_ok=True)
@@ -109,6 +109,7 @@ def start_translation_task():
         "service": "azure-openai",
         "thread": 100,
         "use_concurrent_table_translation": True,
+        "analysis_report": True,
     }
 
     with open(PDF_PATH, "rb") as f:

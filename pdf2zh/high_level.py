@@ -614,6 +614,7 @@ def translate_stream_v2(
     skip_subset_fonts: bool = False,
     ignore_cache: bool = False,
     use_concurrent_table_translation: bool = False,
+    stats_obj: Optional[Any] = None,
     **kwarg: Any,
 ):
     """
