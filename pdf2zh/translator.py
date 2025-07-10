@@ -550,10 +550,15 @@ class XinferenceTranslator(BaseTranslator):
 class OpenAITranslator(BaseTranslator):
     # https://github.com/openai/openai-python
     name = "openai"
+    # envs = {
+    #     "OPENAI_BASE_URL": "http://chatgpt.nnit.cn:8695/v1",
+    #     "OPENAI_API_KEY": None,
+    #     "OPENAI_MODEL": "NNITAsia-GPT-4o",
+    # }
     envs = {
-        "OPENAI_BASE_URL": "http://chatgpt.nnit.cn:8695/v1",
-        "OPENAI_API_KEY": None,
-        "OPENAI_MODEL": "NNITAsia-GPT-4o",
+        "OPENAI_BASE_URL": "https://7pgmkbxwjqh3zb-9997.proxy.runpod.net/v1/",
+        "OPENAI_API_KEY": "123123",
+        "OPENAI_MODEL": "qwen3",
     }
     CustomPrompt = True
 

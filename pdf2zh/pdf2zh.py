@@ -425,6 +425,12 @@ def create_parser() -> argparse.ArgumentParser:
         help="Disable concurrent translation for tables.",
     )
 
+    parse_params.add_argument(
+        "--draw-layout-boxes",
+        action="store_true",
+        help="Draw YOLO layout detection boxes on the output PDF for debugging.",
+    )
+
     return parser
 
 
@@ -859,6 +865,7 @@ def translate_file(
     ignore_cache: bool = False,
     debug: bool = False,
     use_concurrent_table_translation: bool = False,
+    draw_layout_boxes: bool = False,  # 新增：是否绘制YOLO检测框
     **kwargs: Any,
 ) -> (Optional[str], Optional[PDFTranslationStatistics]):
     """
@@ -1097,6 +1104,7 @@ def translate_file(
                 use_concurrent_table_translation=use_concurrent_table_translation,
                 compatible=compatible,
                 skip_subset_fonts=skip_subset_fonts,
+                draw_layout_boxes=draw_layout_boxes,
                 **kwargs,
             )
 

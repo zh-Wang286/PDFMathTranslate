@@ -322,6 +322,7 @@ class AnalysisConverter(PDFConverterEx):
         max_workers: Optional[int] = None,
         onnx_inter_op_threads: Optional[int] = None,
         onnx_intra_op_threads: Optional[int] = None,
+        draw_layout_boxes: bool = False,  # 新增：是否绘制YOLO检测框
     ) -> None:
         """
         Initialize the AnalysisConverter.
@@ -486,10 +487,59 @@ class AnalysisConverter(PDFConverterEx):
                 memory_used = (end_memory - start_memory) / 1024 / 1024  # MB
                 time_used = end_time - start_time
 
+                # 创建类别名称映射
+                block_names = {}
+                vcls_details = {}  # 新增：保存vcls详细信息
+                vcls_regions = {}  # 新增：保存vcls区域边界信息
+                all_boxes = []     # 新增：保存所有原始YOLO检测框
+                
+                # 保存所有原始YOLO检测框信息
+                for i, d in enumerate(page_layout.boxes):
+                    box_class = page_layout.names[int(d.cls)]
+                    x0, y0, x1, y1 = d.xyxy.squeeze()
+                    all_boxes.append({
+                        'class': box_class,
+                        'bbox': (x0, y0, x1, y1),
+                        'index': i,
+                        'confidence': float(d.conf) if hasattr(d, 'conf') else 1.0
+                    })
+                
+                for i, d in enumerate(page_layout.boxes):
+                    box_class = page_layout.names[int(d.cls)]
+                    x0, y0, x1, y1 = d.xyxy.squeeze()
+                    b_x0, b_y0, b_x1, b_y1 = (
+                        np.clip(int(x0 - 1), 0, w - 1),
+                        np.clip(int(h - y1 - 1), 0, h - 1),
+                        np.clip(int(x1 + 1), 0, w - 1),
+                        np.clip(int(h - y0 + 1), 0, h - 1),
+                    )
+                    
+                    if box_class == "table":
+                        # 表格使用负数ID
+                        block_names[-(i + 100)] = box_class
+                    elif box_class not in vcls:
+                        # 普通block使用正数ID
+                        block_names[i + 2] = box_class
+                    # vcls类别被标记为0，但保存详细信息
+                    if box_class in vcls:
+                        block_names[0] = 'reserved'
+                        # 保存vcls详细统计
+                        if box_class not in vcls_details:
+                            vcls_details[box_class] = {'count': 0, 'regions': []}
+                        vcls_details[box_class]['count'] += 1
+                        vcls_details[box_class]['regions'].append({
+                            'bbox': (x0, y0, x1, y1),
+                            'pixels_bbox': (b_x0, b_y0, b_x1, b_y1),
+                            'size': (x1-x0, y1-y0)
+                        })
+
                 return {
                     'pageno': pageno,
                     'box': box,
                     'table_regions': table_regions,
+                    'block_names': block_names,
+                    'vcls_details': vcls_details,  # 新增：vcls详细信息
+                    'all_boxes': all_boxes,       # 新增：所有原始YOLO检测框
                     'metrics': {
                         'memory_mb': memory_used,
                         'time_seconds': time_used,
@@ -523,12 +573,30 @@ class AnalysisConverter(PDFConverterEx):
                         pageno = result['pageno']
                         box = result['box']
                         table_regions = result['table_regions']
+                        block_names = result.get('block_names', {})
+                        vcls_details = result.get('vcls_details', {})  # 新增：获取vcls详细信息
+                        all_boxes = result.get('all_boxes', [])        # 新增：获取所有原始检测框
                         metrics = result['metrics']
                         
                         self.layout[pageno] = box
                         if 'table_regions' not in self.layout:
                             self.layout['table_regions'] = {}
                         self.layout['table_regions'][pageno] = table_regions
+                        
+                        # 保存类别名称映射
+                        if 'block_names' not in self.layout:
+                            self.layout['block_names'] = {}
+                        self.layout['block_names'][pageno] = block_names
+                        
+                        # 保存vcls详细信息
+                        if 'vcls_details' not in self.layout:
+                            self.layout['vcls_details'] = {}
+                        self.layout['vcls_details'][pageno] = vcls_details
+                        
+                        # 保存所有原始检测框信息
+                        if 'all_boxes' not in self.layout:
+                            self.layout['all_boxes'] = {}
+                        self.layout['all_boxes'][pageno] = all_boxes
                         
                         # 更新性能指标
                         performance_metrics['total_memory_mb'] += metrics['memory_mb']
@@ -667,6 +735,150 @@ class AnalysisConverter(PDFConverterEx):
         if vstk:
             if sstk: sstk[-1] += "{v}"
 
+        # ============= 添加详细的页面分析日志 (AnalysisConverter) =============
+        logger.info(f"\n========== 第 {ltpage.pageid + 1} 页内容分析结果 (分析模式) ==========")
+        
+        # 获取block名称映射
+        block_names = {}
+        if 'block_names' in self.layout and ltpage.pageid in self.layout['block_names']:
+            block_names = self.layout['block_names'][ltpage.pageid]
+        
+        # 获取vcls详细信息
+        vcls_details = {}
+        if 'vcls_details' in self.layout and ltpage.pageid in self.layout['vcls_details']:
+            vcls_details = self.layout['vcls_details'][ltpage.pageid]
+        
+        # 统计各类block并显示具体信息
+        block_stats = {}
+        block_details = {}  # 存储每个block的详细信息
+        layout_map = self.layout[ltpage.pageid]
+        unique_ids = set(layout_map.flatten())
+        # logger.info(f"\n========== layout_map 详细信息 ==========\n {layout_map}")
+
+        
+        for block_id in unique_ids:
+            block_id_int = int(block_id)
+            block_name = block_names.get(block_id_int, "unknown")
+            
+            # 标准化块名称
+            if block_name == "unknown":
+                if block_id_int < 0:
+                    block_name = "table"
+                elif block_id_int == 0:
+                    block_name = "reserved"
+                elif block_id_int == 1:
+                    block_name = "background"
+                else:
+                    block_name = "text"
+            
+            # 统计像素数量
+            pixel_count = np.sum(layout_map == block_id)
+            
+            if block_name not in block_stats:
+                block_stats[block_name] = {"count": 0, "pixels": 0, "ids": []}
+            
+            block_stats[block_name]["count"] += 1
+            block_stats[block_name]["pixels"] += pixel_count
+            block_stats[block_name]["ids"].append(block_id_int)
+        
+        # 打印详细的block统计
+        logger.info("检测到的版面区域类型详情:")
+        total_pixels = layout_map.size
+        for block_name, stats in sorted(block_stats.items()):
+            pixel_percentage = (stats["pixels"] / total_pixels) * 100
+            
+            if block_name == "reserved" and vcls_details:
+                # 显示详细的vcls统计信息
+                vcls_summary = []
+                total_vcls_regions = 0
+                for vcls_type, info in vcls_details.items():
+                    vcls_summary.append(f"{vcls_type}={info['count']}")
+                    total_vcls_regions += info['count']
+                vcls_detail_str = ", ".join(vcls_summary)
+                logger.info(f"  - {block_name}: {total_vcls_regions} 个区域, {stats['pixels']} 像素 ({pixel_percentage:.1f}%) (包含: {vcls_detail_str})")
+                
+                # 显示每个vcls区域的边界信息
+                for vcls_type, info in vcls_details.items():
+                    logger.info(f"    {vcls_type} 区域详情:")
+                    for i, region in enumerate(info['regions']):
+                        bbox = region['bbox']
+                        size = region['size']
+                        logger.info(f"      区域 {i+1}: 边界({bbox[0]:.1f}, {bbox[1]:.1f}, {bbox[2]:.1f}, {bbox[3]:.1f}) 尺寸({size[0]:.1f}×{size[1]:.1f})")
+            else:
+                logger.info(f"  - {block_name}: {stats['count']} 个区域, {stats['pixels']} 像素 ({pixel_percentage:.1f}%)")
+                if block_name == "table" and len(stats["ids"]) > 0:
+                    table_ids = [abs(id) for id in stats["ids"] if id < 0]
+                    logger.info(f"    表格ID: {table_ids}")
+                elif len(stats["ids"]) <= 5:
+                    logger.info(f"    区域ID: {stats['ids']}")
+                else:
+                    logger.info(f"    区域ID: {stats['ids'][:3]}...等{len(stats['ids'])}个")
+        
+        # 打印段落信息 (sstk) - 分析模式详细信息
+        logger.info(f"段落文字栈 (sstk) - 共 {len(sstk)} 个段落:")
+        total_chars = 0
+        non_empty_paragraphs = 0
+        paragraphs_with_formulas = 0
+        
+        for i, para_text in enumerate(sstk):
+            para_length = len(para_text.strip())
+            total_chars += para_length
+            
+            if para_length > 0:
+                non_empty_paragraphs += 1
+            
+            # 截断过长的文本用于显示，保留格式符号
+            display_text = para_text.replace('\n', '\\n').replace('\t', '\\t')
+            if len(display_text) > 60:
+                display_text = display_text[:57] + "..."
+            
+            # 分析公式信息（分析模式使用{v}标记）
+            formula_matches = re.findall(r'\{v\}', para_text)
+            formula_count = len(formula_matches)
+            if formula_count > 0:
+                paragraphs_with_formulas += 1
+            
+            # 分析文本类型
+            text_type = ""
+            if not para_text.strip():
+                text_type = " [空白]"
+            elif re.match(r'^\{v\}$', para_text.strip()):
+                text_type = " [纯公式]"
+            elif formula_count > 0:
+                text_type = f" [文本+{formula_count}公式]"
+            elif re.search(r'[\u4e00-\u9fff]', para_text):
+                text_type = " [中文]"
+            elif re.search(r'[a-zA-Z]', para_text):
+                text_type = " [英文]"
+            else:
+                text_type = " [其他]"
+            
+            logger.info(f"  段落 {i+1:2d} ({para_length:3d}字符){text_type}: '{display_text}'")
+        
+        # 段落统计摘要
+        logger.info(f"段落统计: 非空段落 {non_empty_paragraphs}/{len(sstk)}, 总字符数 {total_chars}, 含公式段落 {paragraphs_with_formulas} 个")
+        
+        # 打印段落属性 (pstk) - 增强的信息
+        logger.info(f"段落属性栈 (pstk) - 共 {len(pstk)} 个段落:")
+        if len(pstk) > 0:
+            total_width = sum(para.x1 - para.x0 for para in pstk)
+            total_height = sum(para.y1 - para.y0 for para in pstk)
+            avg_font_size = sum(para.size for para in pstk) / len(pstk)
+            paragraphs_with_breaks = sum(1 for para in pstk if para.brk)
+            
+            for i, para in enumerate(pstk):
+                width = para.x1 - para.x0
+                height = para.y1 - para.y0
+                logger.info(f"  段落 {i+1:2d}: 位置({para.x:.1f}, {para.y:.1f}) 尺寸({width:.1f}×{height:.1f}) 字号:{para.size:.1f} 换行:{para.brk}")
+            
+            logger.info(f"段落属性统计: 平均字号 {avg_font_size:.1f}, 总宽度 {total_width:.1f}, 总高度 {total_height:.1f}, 换行段落 {paragraphs_with_breaks} 个")
+        
+        # 在分析模式下，vstk被处理为简单的{v}标记，分析所有的公式标记
+        total_formula_count = sum(1 for text in sstk for match in re.findall(r'\{v\}', text))
+        logger.info(f"公式符号栈 (vstk) - 分析模式: 检测到 {total_formula_count} 个公式标记")
+        
+        logger.info("=" * 60)
+
         # 3. Calculate and store stats
         paragraph_token_count = 0
         paragraph_count = 0
@@ -708,6 +920,7 @@ class TranslateConverter(PDFConverterEx):
         prompt: Template = None,
         ignore_cache: bool = False,
         use_concurrent_table_translation: bool = False,
+        draw_layout_boxes: bool = False,  # 新增：是否绘制YOLO检测框
     ) -> None:
         super().__init__(rsrcmgr)
         self.vfont = vfont
@@ -718,6 +931,10 @@ class TranslateConverter(PDFConverterEx):
         self.noto = noto
         self.translator: BaseTranslator = None
         self.use_concurrent_table_translation = use_concurrent_table_translation
+        self.draw_layout_boxes = draw_layout_boxes  # 新增：保存绘制检测框的选项
+        
+
+        
         # e.g. "ollama:gemma2:9b" -> ["ollama", "gemma2:9b"]
         param = service.split(":", 1)
         service_name = param[0]
@@ -988,6 +1205,171 @@ class TranslateConverter(PDFConverterEx):
             var.append(vstk)
             varl.append(vlstk)
             varf.append(vfix)
+        
+        # ============= 添加详细的页面分析日志 (翻译模式) =============
+        logger.info(f"\n========== 第 {ltpage.pageid + 1} 页内容分析结果 (翻译模式) ==========")
+        
+        # 获取block名称映射
+        block_names = {}
+        if 'block_names' in self.layout and ltpage.pageid in self.layout['block_names']:
+            block_names = self.layout['block_names'][ltpage.pageid]
+        
+        # 获取vcls详细信息
+        vcls_details = {}
+        if 'vcls_details' in self.layout and ltpage.pageid in self.layout['vcls_details']:
+            vcls_details = self.layout['vcls_details'][ltpage.pageid]
+        
+        # 统计各类block并显示具体信息
+        block_stats = {}
+        block_details = {}  # 存储每个block的详细信息
+        layout_map = self.layout[ltpage.pageid]
+        unique_ids = set(layout_map.flatten())
+        # logger.info(f"\n========== layout_map 详细信息 ==========\n {layout_map}")
+        
+        for block_id in unique_ids:
+            block_id_int = int(block_id)
+            block_name = block_names.get(block_id_int, "unknown")
+            
+            # 标准化块名称
+            if block_name == "unknown":
+                if block_id_int < 0:
+                    block_name = "table"
+                elif block_id_int == 0:
+                    block_name = "reserved"
+                elif block_id_int == 1:
+                    block_name = "background"
+                else:
+                    block_name = "text"
+            
+            # 统计像素数量
+            pixel_count = np.sum(layout_map == block_id)
+            
+            if block_name not in block_stats:
+                block_stats[block_name] = {"count": 0, "pixels": 0, "ids": []}
+            
+            block_stats[block_name]["count"] += 1
+            block_stats[block_name]["pixels"] += pixel_count
+            block_stats[block_name]["ids"].append(block_id_int)
+        
+        # 打印详细的block统计
+        logger.info("检测到的版面区域类型详情:")
+        total_pixels = layout_map.size
+        for block_name, stats in sorted(block_stats.items()):
+            pixel_percentage = (stats["pixels"] / total_pixels) * 100
+            
+            if block_name == "reserved" and vcls_details:
+                # 显示详细的vcls统计信息
+                vcls_summary = []
+                total_vcls_regions = 0
+                for vcls_type, info in vcls_details.items():
+                    vcls_summary.append(f"{vcls_type}={info['count']}")
+                    total_vcls_regions += info['count']
+                vcls_detail_str = ", ".join(vcls_summary)
+                logger.info(f"  - {block_name}: {total_vcls_regions} 个区域, {stats['pixels']} 像素 ({pixel_percentage:.1f}%) (包含: {vcls_detail_str})")
+                
+                # 显示每个vcls区域的边界信息
+                for vcls_type, info in vcls_details.items():
+                    logger.info(f"    {vcls_type} 区域详情:")
+                    for i, region in enumerate(info['regions']):
+                        bbox = region['bbox']
+                        size = region['size']
+                        logger.info(f"      区域 {i+1}: 边界({bbox[0]:.1f}, {bbox[1]:.1f}, {bbox[2]:.1f}, {bbox[3]:.1f}) 尺寸({size[0]:.1f}×{size[1]:.1f})")
+            else:
+                logger.info(f"  - {block_name}: {stats['count']} 个区域, {stats['pixels']} 像素 ({pixel_percentage:.1f}%)")
+                if block_name == "table" and len(stats["ids"]) > 0:
+                    table_ids = [abs(id) for id in stats["ids"] if id < 0]
+                    logger.info(f"    表格ID: {table_ids}")
+                elif len(stats["ids"]) <= 5:
+                    logger.info(f"    区域ID: {stats['ids']}")
+                else:
+                    logger.info(f"    区域ID: {stats['ids'][:3]}...等{len(stats['ids'])}个")
+        
+        # 打印段落信息 (sstk) - 翻译模式详细信息
+        logger.info(f"段落文字栈 (sstk) - 共 {len(sstk)} 个段落:")
+        total_chars = 0
+        non_empty_paragraphs = 0
+        paragraphs_with_formulas = 0
+        
+        for i, para_text in enumerate(sstk):
+            para_length = len(para_text.strip())
+            total_chars += para_length
+            
+            if para_length > 0:
+                non_empty_paragraphs += 1
+            
+            # 截断过长的文本用于显示，保留格式符号
+            display_text = para_text.replace('\n', '\\n').replace('\t', '\\t')
+            if len(display_text) > 60:
+                display_text = display_text[:57] + "..."
+            
+            # 分析公式信息（翻译模式使用{v\d+}标记）
+            formula_matches = re.findall(r'\{v\d+\}', para_text)
+            formula_count = len(formula_matches)
+            if formula_count > 0:
+                paragraphs_with_formulas += 1
+            
+            # 分析文本类型
+            text_type = ""
+            if not para_text.strip():
+                text_type = " [空白]"
+            elif re.match(r'^\{v\d+\}$', para_text.strip()):
+                text_type = " [纯公式]"
+            elif formula_count > 0:
+                text_type = f" [文本+{formula_count}公式]"
+                # 显示公式ID
+                formula_ids = [re.search(r'\{v(\d+)\}', match).group(1) for match in formula_matches]
+                text_type += f"(ID:{','.join(formula_ids[:3])}{'...' if len(formula_ids) > 3 else ''})"
+            elif re.search(r'[\u4e00-\u9fff]', para_text):
+                text_type = " [中文]"
+            elif re.search(r'[a-zA-Z]', para_text):
+                text_type = " [英文]"
+            else:
+                text_type = " [其他]"
+            
+            logger.info(f"  段落 {i+1:2d} ({para_length:3d}字符){text_type}: '{display_text}'")
+        
+        # 段落统计摘要
+        logger.info(f"段落统计: 非空段落 {non_empty_paragraphs}/{len(sstk)}, 总字符数 {total_chars}, 含公式段落 {paragraphs_with_formulas} 个")
+        
+        # 打印段落属性 (pstk) - 增强的信息
+        logger.info(f"段落属性栈 (pstk) - 共 {len(pstk)} 个段落:")
+        if len(pstk) > 0:
+            total_width = sum(para.x1 - para.x0 for para in pstk)
+            total_height = sum(para.y1 - para.y0 for para in pstk)
+            avg_font_size = sum(para.size for para in pstk) / len(pstk)
+            paragraphs_with_breaks = sum(1 for para in pstk if para.brk)
+            
+            for i, para in enumerate(pstk):
+                width = para.x1 - para.x0
+                height = para.y1 - para.y0
+                logger.info(f"  段落 {i+1:2d}: 位置({para.x:.1f}, {para.y:.1f}) 尺寸({width:.1f}×{height:.1f}) 字号:{para.size:.1f} 换行:{para.brk}")
+            
+            logger.info(f"段落属性统计: 平均字号 {avg_font_size:.1f}, 总宽度 {total_width:.1f}, 总高度 {total_height:.1f}, 换行段落 {paragraphs_with_breaks} 个")
+        
+        # 打印公式信息 (vstk -> var) - 翻译模式详细信息
+        logger.info(f"公式符号组 (var) - 共 {len(var)} 个公式组:")
+        if len(var) > 0:
+            total_formula_chars = sum(len(v) for v in var)
+            total_formula_lines = sum(len(varl[i]) for i in range(len(var)))
+            
+            for i, v in enumerate(var):
+                if v:  # 确保公式组不为空
+                    formula_text = "".join([ch.get_text() for ch in v])
+                    # 截断过长的公式文本
+                    display_formula = formula_text[:30] + "..." if len(formula_text) > 30 else formula_text
+                    formula_width = max([vch.x1 for vch in v]) - v[0].x0 if v else 0
+                    formula_height = max([vch.y1 for vch in v]) - min([vch.y0 for vch in v]) if v else 0
+                    
+                    # 分析字体信息
+                    fonts_used = list(set([ch.fontname for ch in v]))
+                    font_info = f" 字体:{len(fonts_used)}种" if len(fonts_used) > 1 else f" 字体:{fonts_used[0] if fonts_used else 'unknown'}"
+                    
+                    logger.info(f"  公式 {i+1:2d}: '{display_formula}' 尺寸({formula_width:.1f}×{formula_height:.1f}) 字符:{len(v)} 线条:{len(varl[i])}{font_info}")
+            
+            logger.info(f"公式统计: 总字符数 {total_formula_chars}, 总线条数 {total_formula_lines}, 平均字符/公式 {total_formula_chars/len(var):.1f}")
+        
+        logger.info("=" * 60)
+        
         logger.debug("\n==========[VSTACK]==========\n")
         for id, v in enumerate(var):  # 计算公式宽度
             l = max([vch.x1 for vch in v]) - v[0].x0
@@ -1307,9 +1689,13 @@ class TranslateConverter(PDFConverterEx):
         if len(table_regions) > 0:
             logger.info(f"完成 {len(table_regions)} 个表格的排版 ({translation_mode}模式)")
 
+        ############################################################
+        # E. 绘制YOLO检测框已移除 - 只在原始PDF页面显示检测框
+
         ops = f"BT {''.join(ops_list)}ET "
         return ops
-    
+
+
 
 class SerialTableTranslator:
     """

@@ -59,6 +59,226 @@ noto_list = [
 ]
 
 
+def _add_layout_boxes_to_original_pages(doc: Document, layout: dict, pages: Optional[list[int]] = None):
+    """
+    在原始PDF页面上添加YOLO检测框
+    
+    Args:
+        doc: 原始PDF文档对象
+        layout: 包含检测框信息的layout字典
+        pages: 要处理的页面列表，如果为None则处理所有页面
+    """
+    logger.info("开始在原始PDF页面上绘制YOLO检测框")
+    
+    # 定义不同区域类型的颜色映射（RGB值，0-1范围）
+    # 绿色：会被翻译的区域，红色：不会被翻译的区域
+    box_colors = {
+        'text': (0.0, 0.8, 0.0),           # 绿色 - 会翻译
+        'table': (0.0, 0.8, 0.0),          # 绿色 - 会翻译
+        'figure': (1.0, 0.0, 0.0),         # 红色 - 不翻译
+        'abandon': (1.0, 0.0, 0.0),        # 红色 - 不翻译
+        'isolate_formula': (1.0, 0.0, 0.0), # 红色 - 不翻译
+        'formula_caption': (1.0, 0.0, 0.0), # 红色 - 不翻译
+        'reserved': (1.0, 0.0, 0.0),       # 红色 - 不翻译
+    }
+    
+    def gen_box_op(x0, y0, x1, y1, color, linewidth=2.0, label=""):
+        """生成绘制矩形框的PDF操作指令"""
+        r, g, b = color
+        box_op = f"q {r:.3f} {g:.3f} {b:.3f} RG {linewidth:.1f} w "
+        box_op += f"{x0:.1f} {y0:.1f} {x1-x0:.1f} {y1-y0:.1f} re S "
+        
+        # 添加标签文字（如果提供）
+        if label:
+            label_x = x0 + 2
+            label_y = y1 - 12
+            font_size = 8
+            
+            # 使用简单的文字绘制（Helvetica是PDF标准字体）
+            try:
+                # 使用带描边的文字以提高可读性，移除白色背景避免遮挡原文
+                # 先绘制白色描边（外轮廓），再绘制黑色填充
+                box_op += f"1 1 1 RG 1.5 w 2 Tr BT /Helvetica {font_size:.1f} Tf "  # 白色描边
+                box_op += f"{label_x:.1f} {label_y:.1f} Td ({label}) Tj ET "
+                box_op += f"0 0 0 rg 0 Tr BT /Helvetica {font_size:.1f} Tf "  # 黑色填充
+                box_op += f"{label_x:.1f} {label_y:.1f} Td ({label}) Tj ET "
+            except Exception as e:
+                logger.debug(f"绘制标签时出错: {e}，跳过标签绘制")
+        
+        box_op += "Q "
+        return box_op
+    
+    # 确定要处理的页面范围
+    pages_to_process = []
+    if pages:
+        pages_to_process = [p for p in pages if p < doc.page_count]
+    else:
+        pages_to_process = list(range(doc.page_count))
+    
+    for page_idx in pages_to_process:
+        if page_idx not in layout:
+            logger.debug(f"页面 {page_idx} 没有layout信息，跳过")
+            continue
+            
+        page = doc[page_idx]
+        box_ops = []
+        
+        # 获取所有原始检测框信息（优先使用all_boxes）
+        all_boxes = []
+        if 'all_boxes' in layout and page_idx in layout['all_boxes']:
+            all_boxes = layout['all_boxes'][page_idx]
+        
+        if all_boxes:
+            logger.debug(f"页面 {page_idx+1} 发现 {len(all_boxes)} 个YOLO检测框")
+            for box_info in all_boxes:
+                box_class = box_info['class']
+                x0, y0, x1, y1 = box_info['bbox']
+                confidence = box_info.get('confidence', 1.0)
+                index = box_info.get('index', 0)
+                
+                # 获取对应的颜色
+                color = box_colors.get(box_class, (0.5, 0.5, 0.5))  # 默认灰色
+                
+                # 创建标签
+                label = f"{box_class}_{index+1}"
+                if confidence < 1.0:
+                    label += f"({confidence:.2f})"
+                
+                # 根据类别设置线宽
+                linewidth = 3.0 if box_class == 'table' else 2.0
+                
+                box_ops.append(gen_box_op(x0, y0, x1, y1, color, linewidth, label))
+                logger.debug(f"页面{page_idx+1} 绘制{box_class}检测框: ({x0:.1f}, {y0:.1f}, {x1:.1f}, {y1:.1f}) 置信度:{confidence:.2f}")
+        else:
+            # 回退到使用其他layout信息
+            logger.debug(f"页面 {page_idx+1} 未找到all_boxes信息，使用其他layout信息")
+            
+            # 获取vcls详细信息
+            vcls_details = {}
+            if 'vcls_details' in layout and page_idx in layout['vcls_details']:
+                vcls_details = layout['vcls_details'][page_idx]
+                
+                for vcls_type, info in vcls_details.items():
+                    color = box_colors.get(vcls_type, box_colors['reserved'])
+                    for i, region in enumerate(info['regions']):
+                        bbox = region['bbox']
+                        x0, y0, x1, y1 = bbox
+                        label = f"{vcls_type}_{i+1}"
+                        box_ops.append(gen_box_op(x0, y0, x1, y1, color, 2.0, label))
+            
+            # 绘制表格区域框
+            if 'table_regions' in layout and page_idx in layout['table_regions']:
+                table_info = layout['table_regions'][page_idx]
+                color = box_colors['table']
+                for i, table_info_item in enumerate(table_info):
+                    original_bbox = table_info_item.get('original_bbox')
+                    if original_bbox is not None:
+                        x0, y0, x1, y1 = original_bbox
+                        label = f"table_{i+1}"
+                        box_ops.append(gen_box_op(x0, y0, x1, y1, color, 3.0, label))
+        
+        # 将检测框操作指令添加到页面内容流
+        if box_ops:
+            try:
+                # 获取原有页面内容
+                existing_content = page.get_contents()
+                combined_ops = "".join(box_ops)
+                
+                # 处理existing_content可能是列表的情况
+                if existing_content:
+                    if isinstance(existing_content, list):
+                        # 如果是列表，合并所有内容流
+                        content_bytes = b"".join(existing_content)
+                        logger.debug(f"页面 {page_idx+1} 有 {len(existing_content)} 个内容流，已合并")
+                    else:
+                        # 如果是单个字节串
+                        content_bytes = existing_content
+                        logger.debug(f"页面 {page_idx+1} 有单个内容流")
+                    new_content = content_bytes + b" " + combined_ops.encode()
+                else:
+                    new_content = combined_ops.encode()
+                    logger.debug(f"页面 {page_idx+1} 无现有内容，创建新内容流")
+                
+                # 创建新的内容流对象
+                new_xref = doc.get_new_xref()
+                doc.update_object(new_xref, "<<>>")
+                doc.update_stream(new_xref, new_content)
+                
+                # 设置新的内容流到页面
+                page.set_contents(new_xref)
+                
+                logger.debug(f"页面 {page_idx+1} 成功添加 {len(box_ops)} 个检测框")
+                
+            except Exception as e:
+                logger.warning(f"页面 {page_idx+1} 添加检测框失败: {e}，尝试替代方法")
+                try:
+                    # 替代方法：使用PyMuPDF的shape绘制
+                    shape = page.new_shape()
+                    boxes_to_draw = []
+                    
+                    # 收集需要绘制的框
+                    if all_boxes:
+                        boxes_to_draw = all_boxes
+                    else:
+                        # 从其他layout信息收集框信息
+                        if 'vcls_details' in layout and page_idx in layout['vcls_details']:
+                            vcls_details = layout['vcls_details'][page_idx]
+                            for vcls_type, info in vcls_details.items():
+                                for i, region in enumerate(info['regions']):
+                                    bbox = region['bbox']
+                                    boxes_to_draw.append({
+                                        'class': vcls_type,
+                                        'bbox': bbox,
+                                        'index': i,
+                                        'confidence': 1.0
+                                    })
+                        
+                        if 'table_regions' in layout and page_idx in layout['table_regions']:
+                            table_info = layout['table_regions'][page_idx]
+                            for i, table_info_item in enumerate(table_info):
+                                original_bbox = table_info_item.get('original_bbox')
+                                if original_bbox is not None:
+                                    boxes_to_draw.append({
+                                        'class': 'table',
+                                        'bbox': original_bbox,
+                                        'index': i,
+                                        'confidence': 1.0
+                                    })
+                    
+                    # 绘制所有框
+                    for box_info in boxes_to_draw:
+                        box_class = box_info['class']
+                        x0, y0, x1, y1 = box_info['bbox']
+                        confidence = box_info.get('confidence', 1.0)
+                        index = box_info.get('index', 0)
+                        
+                        color = box_colors.get(box_class, (0.5, 0.5, 0.5))
+                        linewidth = 3.0 if box_class == 'table' else 2.0
+                        
+                        # 绘制矩形 - 确保无填充
+                        rect = [x0, y0, x1, y1]
+                        shape.draw_rect(rect)
+                        shape.finish(width=linewidth, color=color, fill=None)
+                        
+                        # 添加标签
+                        label = f"{box_class}_{index+1}"
+                        if confidence < 1.0:
+                            label += f"({confidence:.2f})"
+                        
+                        # 文字标签 - 移除白色填充避免遮挡原文
+                        text_point = (x0 + 2, y1 - 12)
+                        shape.insert_text(text_point, label, fontsize=8, color=(0, 0, 0), 
+                                        fill=None, render_mode=0)
+                    
+                    shape.commit()
+                    logger.debug(f"页面 {page_idx+1} 使用shape方法成功添加 {len(boxes_to_draw)} 个检测框")
+                    
+                except Exception as e2:
+                    logger.error(f"页面 {page_idx+1} 两种方法都失败: {e2}")
+    
+    logger.info(f"完成在原始PDF的 {len(pages_to_process)} 个页面上绘制检测框")
+
+
 def analyze_pdf(
     pdf_bytes: bytes,
     model: OnnxModel,
@@ -113,6 +333,7 @@ def translate_patch(
     prompt: Template = None,
     ignore_cache: bool = False,
     use_concurrent_table_translation: bool = False,
+    draw_layout_boxes: bool = False,  # 新增：是否绘制YOLO检测框
     **kwarg: Any,
 ) -> dict:
     rsrcmgr = PDFResourceManager()
@@ -132,6 +353,7 @@ def translate_patch(
         prompt,
         ignore_cache,
         use_concurrent_table_translation,
+        draw_layout_boxes,  # 新增：传递绘制检测框选项
     )
 
     assert device is not None
@@ -201,6 +423,65 @@ def translate_patch(
                 layout['table_regions'] = {}
             layout['table_regions'][page.pageno] = table_regions
             
+            # 创建并存储类别名称映射
+            block_names = {}
+            vcls_details = {}  # 新增：保存vcls详细信息
+            all_boxes = []     # 新增：保存所有原始YOLO检测框
+            
+            # 保存所有原始YOLO检测框信息
+            for i, d in enumerate(page_layout.boxes):
+                box_class = page_layout.names[int(d.cls)]
+                x0, y0, x1, y1 = d.xyxy.squeeze()
+                all_boxes.append({
+                    'class': box_class,
+                    'bbox': (x0, y0, x1, y1),
+                    'index': i,
+                    'confidence': float(d.conf) if hasattr(d, 'conf') else 1.0
+                })
+            
+            for i, d in enumerate(page_layout.boxes):
+                box_class = page_layout.names[int(d.cls)]
+                x0, y0, x1, y1 = d.xyxy.squeeze()
+                b_x0, b_y0, b_x1, b_y1 = (
+                    np.clip(int(x0 - 1), 0, w - 1),
+                    np.clip(int(h - y1 - 1), 0, h - 1),
+                    np.clip(int(x1 + 1), 0, w - 1),
+                    np.clip(int(h - y0 + 1), 0, h - 1),
+                )
+                
+                if box_class == "table":
+                    # 表格使用负数ID
+                    block_names[-(i + 100)] = box_class
+                elif box_class not in vcls:
+                    # 普通block使用正数ID
+                    block_names[i + 2] = box_class
+                # vcls类别被标记为0，但保存详细信息
+                if box_class in vcls:
+                    block_names[0] = 'reserved'
+                    # 保存vcls详细统计
+                    if box_class not in vcls_details:
+                        vcls_details[box_class] = {'count': 0, 'regions': []}
+                    vcls_details[box_class]['count'] += 1
+                    vcls_details[box_class]['regions'].append({
+                        'bbox': (x0, y0, x1, y1),
+                        'pixels_bbox': (b_x0, b_y0, b_x1, b_y1),
+                        'size': (x1-x0, y1-y0)
+                    })
+            
+            if 'block_names' not in layout:
+                layout['block_names'] = {}
+            layout['block_names'][page.pageno] = block_names
+            
+            # 保存vcls详细信息
+            if 'vcls_details' not in layout:
+                layout['vcls_details'] = {}
+            layout['vcls_details'][page.pageno] = vcls_details
+            
+            # 保存所有原始检测框信息
+            if 'all_boxes' not in layout:
+                layout['all_boxes'] = {}
+            layout['all_boxes'][page.pageno] = all_boxes
+            
             if table_count > 0:
                 logger.info(f"[版面分析] 第 {page.pageno+1} 页共发现 {table_count} 个表格区域")
             
@@ -242,7 +523,7 @@ def translate_patch(
         table_stats = device.get_table_stats()
         logger.debug(f"[翻译完成] 表格统计: {table_stats}")
     
-    return obj_patch, token_stats, paragraph_stats, table_stats
+    return obj_patch, token_stats, paragraph_stats, table_stats, layout
 
 
 def translate_stream(
@@ -262,6 +543,7 @@ def translate_stream(
     skip_subset_fonts: bool = False,
     ignore_cache: bool = False,
     use_concurrent_table_translation: bool = False,
+    draw_layout_boxes: bool = False,  # 新增：是否绘制YOLO检测框
     **kwarg: Any,
 ):
     font_list = [("tiro", None)]
@@ -309,7 +591,7 @@ def translate_stream(
     fp = io.BytesIO()
 
     doc_zh.save(fp)
-    obj_patch, token_stats, paragraph_stats, table_stats = translate_patch(fp, **locals())
+    obj_patch, token_stats, paragraph_stats, table_stats, layout = translate_patch(fp, **locals())
 
     for obj_id, ops_new in obj_patch.items():
         # ops_old=doc_en.xref_stream(obj_id)
@@ -317,6 +599,10 @@ def translate_stream(
         # print(ops_old)
         # print(ops_new.encode())
         doc_zh.update_stream(obj_id, ops_new.encode())
+
+    # 新增：如果需要绘制检测框，在原始PDF页面上也添加检测框
+    if draw_layout_boxes:
+        _add_layout_boxes_to_original_pages(doc_en, layout, pages)
 
     doc_en.insert_file(doc_zh)
     for id in range(page_count):
@@ -402,6 +688,7 @@ def translate(
     ignore_cache: bool = False,
     stats_obj: Optional[Any] = None,  # 添加统计对象参数
     use_concurrent_table_translation: bool = False,  # 单元格并发翻译
+    draw_layout_boxes: bool = False,  # 新增：是否绘制YOLO检测框
     **kwarg: Any,
 ):
     if not files:
@@ -614,6 +901,7 @@ def translate_stream_v2(
     skip_subset_fonts: bool = False,
     ignore_cache: bool = False,
     use_concurrent_table_translation: bool = False,
+    draw_layout_boxes: bool = False,  # 新增：是否绘制YOLO检测框
     stats_obj: Optional[Any] = None,
     **kwarg: Any,
 ):
@@ -670,7 +958,7 @@ def translate_stream_v2(
     fp = io.BytesIO()
 
     doc_zh.save(fp)
-    obj_patch, token_stats, paragraph_stats, table_stats = translate_patch(fp, **locals())
+    obj_patch, token_stats, paragraph_stats, table_stats, layout = translate_patch(fp, **locals())
 
     for obj_id, ops_new in obj_patch.items():
         # ops_old=doc_en.xref_stream(obj_id)
@@ -678,6 +966,10 @@ def translate_stream_v2(
         # print(ops_old)
         # print(ops_new.encode())
         doc_zh.update_stream(obj_id, ops_new.encode())
+
+    # 新增：如果需要绘制检测框，在原始PDF页面上也添加检测框
+    if draw_layout_boxes:
+        _add_layout_boxes_to_original_pages(doc_en, layout, pages)
 
     doc_en.insert_file(doc_zh)
     for id in range(page_count):
