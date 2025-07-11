@@ -384,7 +384,8 @@ def translate_patch(
             # kdtree 是不可能 kdtree 的，不如直接渲染成图片，用空间换时间
             box = np.ones((pix.height, pix.width))
             h, w = box.shape
-            vcls = ["abandon", "figure", "isolate_formula", "formula_caption"]
+            # vcls = ["abandon", "figure", "isolate_formula", "formula_caption"]
+            vcls = ["figure", "isolate_formula", "formula_caption"] # 打开翻译abandon
             table_regions = []  # 存储表格区域信息
             table_count = 0  # 表格计数
             for i, d in enumerate(page_layout.boxes):
